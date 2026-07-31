@@ -1,0 +1,7 @@
+# The shipped artifact. Committed on purpose (docs/adr/0003-commit-the-wasm.md);
+# marked binary so git never tries to diff or merge it, and so a rebuild shows
+# up in review as "the artifact changed" rather than as noise.
+packages/revm-wasm/wasm/*.wasm binary
+
+# Recorded outcomes from native revm. One long line per call by design.
+packages/revm-wasm/fixtures/expected/*.json -diff

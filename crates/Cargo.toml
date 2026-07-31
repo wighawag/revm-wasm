@@ -1,0 +1,37 @@
+[workspace]
+members = ["core", "wasm"]
+resolver = "2"
+
+[workspace.dependencies]
+# revm is pinned by EXACT REVISION, never by a version range. Three things move
+# the bytes of the shipped artifact: rustc, wasm-opt and revm itself. All three
+# are pinned; see `rust-toolchain.toml` and `scripts/build-wasm.sh` for the
+# other two, and `docs/adr/0005-pinned-toolchain.md` for why.
+#
+# revm 42.0.1, bluealloy/revm @ 640eafa91beae73bafb7776845d53133f603048f
+revm = { git = "https://github.com/bluealloy/revm", rev = "640eafa91beae73bafb7776845d53133f603048f", default-features = false }
+revm-wasm-core = { path = "core", default-features = false }
+
+# The shipped profile. See docs/adr/0001-all-precompiles-opt-level-3.md:
+# `opt-level = 3` is load-bearing, `opt-level = "z"` costs 2.4x to 6x on keccak.
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true
+debug = false
+incremental = false
+
+# Size-optimised profile. Measurement and future build variants only; NOT the
+# artifact this package publishes. Kept so the size/speed tradeoff in ADR 0001
+# can be re-measured rather than re-argued.
+[profile.minsize]
+inherits = "release"
+opt-level = "z"
+
+# Same codegen as `release` but keeps the wasm name section, so it is possible to
+# see which functions actually survive LTO in a given configuration.
+[profile.probe]
+inherits = "release"
+strip = false

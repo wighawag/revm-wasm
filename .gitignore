@@ -1,0 +1,19 @@
+# environment variables
+.env*.local
+
+# node modules
+node_modules/
+
+# Rust build output
+crates/target/
+
+# Intermediate pre-wasm-opt artifact. The OPTIMISED `revm.wasm` IS committed on
+# purpose (docs/adr/0003-commit-the-wasm.md); this is only the input to wasm-opt.
+*.unopt.wasm
+
+# Measurement scratch
+/measurements/*.wasm
+
+# playwright
+test-results/
+playwright-report/

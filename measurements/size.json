@@ -1,0 +1,14 @@
+{
+  "measuredAt": "2026-07-31T16:35:53.548Z",
+  "artifact": "packages/revm-wasm/wasm/revm.wasm",
+  "raw": 1226474,
+  "gzip": 420025,
+  "brotli": 306228,
+  "spikeReference": {
+    "wasmGzip": 434009,
+    "glueGzip": 3327,
+    "totalGzip": 437336
+  },
+  "deltaVsSpikeWasm": -13984,
+  "deltaVsSpikeTotal": -17311
+}

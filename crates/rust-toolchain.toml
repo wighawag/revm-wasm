@@ -1,0 +1,5 @@
+[toolchain]
+# Pinned: rustc codegen moves the artifact bytes. See ADR 0005.
+channel = "1.91.1"
+targets = ["wasm32-unknown-unknown"]
+profile = "minimal"

@@ -1,0 +1,64 @@
+{
+	"name": "revm-wasm",
+	"version": "0.0.0",
+	"description": "UNOFFICIAL binding: revm (bluealloy, MIT) compiled to WebAssembly, with a typed JavaScript API. No Rust toolchain required.",
+	"license": "MIT",
+	"author": "wighawag",
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/wighawag/revm-wasm.git",
+		"directory": "packages/revm-wasm"
+	},
+	"homepage": "https://github.com/wighawag/revm-wasm#readme",
+	"bugs": {
+		"url": "https://github.com/wighawag/revm-wasm/issues"
+	},
+	"publishConfig": {
+		"access": "public"
+	},
+	"type": "module",
+	"exports": {
+		".": {
+			"types": "./dist/index.d.ts",
+			"default": "./dist/index.js"
+		},
+		"./wasm-url": {
+			"types": "./dist/wasm-url.d.ts",
+			"default": "./dist/wasm-url.js"
+		},
+		"./revm.wasm": "./wasm/revm.wasm",
+		"./package.json": "./package.json"
+	},
+	"files": [
+		"dist",
+		"src",
+		"wasm/revm.wasm"
+	],
+	"keywords": [
+		"evm",
+		"revm",
+		"wasm",
+		"ethereum",
+		"webassembly"
+	],
+	"dependencies": {},
+	"devDependencies": {
+		"@noble/hashes": "^2.0.0",
+		"@playwright/test": "^1.50.0",
+		"@types/node": "^25.2.0",
+		"as-soon": "^0.1.5",
+		"esbuild": "^0.28.0",
+		"playwright-browser-harness": "^0.3.0",
+		"tsx": "^4.21.0",
+		"typescript": "^5.3.3",
+		"vitest": "^4.0.18"
+	},
+	"scripts": {
+		"build": "tsc",
+		"dev": "as-soon -w src pnpm build",
+		"test": "vitest run",
+		"test:watch": "vitest",
+		"test:browser": "playwright test",
+		"bench:keys": "tsx bench/keys.bench.ts"
+	}
+}

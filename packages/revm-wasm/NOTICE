@@ -1,0 +1,49 @@
+revm-wasm
+=========
+
+An UNOFFICIAL WebAssembly binding for revm. Not affiliated with, endorsed by, or
+maintained by the revm project.
+
+The published `revm.wasm` artifact contains compiled code from revm and its
+dependency tree. revm is not vendored or forked in this repository; it is a
+pinned git dependency and is compiled unmodified.
+
+
+revm
+----
+
+Copyright (c) 2021-2026 draganrakita
+Licensed under the MIT License.
+
+    https://github.com/bluealloy/revm
+
+Pinned revision: 640eafa91beae73bafb7776845d53133f603048f (crate version 42.0.1)
+
+The full MIT licence text is reproduced in LICENSE, which is the same licence
+this package is published under.
+
+Substantially all of the EVM behaviour this package exposes -- the interpreter,
+the precompiles, the fee market, gas accounting, EIP-161 state clearing,
+EIP-6780, EIP-2930 access-list warming, EIP-4844 and EIP-7702 handling -- is
+revm's work, driven through revm's own code paths. This package contributes a
+build configuration, a host database adapter, a binary outcome encoding and a
+typed JavaScript API.
+
+
+Other components compiled into the artifact
+-------------------------------------------
+
+The artifact statically links revm's pure-Rust cryptography backends, each under
+its own permissive licence (MIT and/or Apache-2.0):
+
+    k256, elliptic-curve, ecdsa            (ecrecover, EIP-7702 authority recovery)
+    sha2, ripemd, blake2                   (hash precompiles)
+    aurora-engine-modexp                   (modexp)
+    ark-bn254, ark-bls12-381, ark-ec, ark-ff, ark-poly   (bn254, BLS12-381, KZG)
+    p256                                   (secp256r1 / RIP-7212)
+    alloy-primitives and the alloy EIP crates
+    revm-* workspace crates
+
+Run `cargo tree` in `crates/` for the complete, exact dependency set of a given
+build, and `cargo about` or an equivalent tool if you need a full licence
+manifest for compliance purposes.

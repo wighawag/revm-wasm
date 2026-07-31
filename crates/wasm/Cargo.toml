@@ -1,0 +1,47 @@
+[package]
+name = "revm-wasm-abi"
+version = "0.0.0"
+edition = "2021"
+publish = false
+license = "MIT"
+description = "The wasm32 ABI surface of revm-wasm: a raw C ABI, no wasm-bindgen."
+
+[lib]
+name = "revm_wasm"
+crate-type = ["cdylib"]
+
+[dependencies]
+revm-wasm-core = { workspace = true, default-features = false }
+
+# MEASUREMENT ONLY, and only pulled in by `measure-tracer`.
+#
+# revm's `tracer` feature transitively enables `std` across the revm stack,
+# which enables `k256/std` -> `elliptic-curve` -> `rand_core/getrandom`, and
+# getrandom 0.2 has NO backend for wasm32-unknown-unknown. Without this the
+# tracer feature simply does not compile for our target, so the size question
+# could not be answered at all. `custom` lets us register a stub backend that
+# always errors: nothing in an EVM asks for randomness, so the stub is never
+# called, and it costs essentially nothing in the artifact. Crucially it avoids
+# getrandom's `js` feature, which would drag wasm-bindgen and js-sys back in and
+# make the measured delta meaningless.
+getrandom = { version = "0.2", features = ["custom"], optional = true }
+
+[features]
+default = ["precompiles-all"]
+
+precompiles-all = ["revm-wasm-core/precompiles-all"]
+precompiles-common = ["revm-wasm-core/precompiles-common"]
+precompiles-none = ["revm-wasm-core/precompiles-none"]
+
+blst = ["revm-wasm-core/blst"]
+std = ["revm-wasm-core/std"]
+relaxed-validation = ["revm-wasm-core/relaxed-validation"]
+measure-tracer = ["revm-wasm-core/measure-tracer", "dep:getrandom"]
+
+# Measurement only. See crates/core/Cargo.toml.
+ablate-outcome-v1 = ["revm-wasm-core/ablate-outcome-v1"]
+ablate-commit = ["revm-wasm-core/ablate-commit"]
+ablate-extra-exports = ["revm-wasm-core/ablate-extra-exports"]
+ablate-bloom = ["revm-wasm-core/ablate-bloom"]
+ablate-fees = ["revm-wasm-core/ablate-fees"]
+ablate-egp = ["revm-wasm-core/ablate-egp"]

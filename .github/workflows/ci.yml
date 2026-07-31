@@ -1,0 +1,78 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  # The whole test suite, with NO Rust toolchain. That is the point: the
+  # artifact and the recorded expectations are committed, so this job proves a
+  # contributor can clone and run everything.
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm format:check
+      - run: pnpm build
+      - run: pnpm test
+      - run: node scripts/measure-size.mjs
+
+  # The same corpus in two engines. V8 and JavaScriptCore differ enough on wasm
+  # that testing one and implying both is a real mistake.
+  browser:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter revm-wasm exec playwright install --with-deps chromium webkit
+      - run: pnpm test:browser
+
+  # Rebuilds the wasm from source on the PINNED toolchain and checks that the
+  # rebuilt artifact still passes the behavioural corpus.
+  #
+  # It deliberately does NOT compare bytes with the committed artifact. Three
+  # builds of identical source on one machine produced 420,025 / 420,027 /
+  # 420,029 bytes gzipped, and a rustc or binaryen bump moves far more than
+  # that. Byte identity is a test that fails for the wrong reason. See ADR 0005.
+  wasm-rebuild:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: '1.91.1'
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: crates
+      - name: Install binaryen 131
+        run: |
+          curl -sSL https://github.com/WebAssembly/binaryen/releases/download/version_131/binaryen-version_131-x86_64-linux.tar.gz \
+            | tar -xz -C /tmp
+          echo "/tmp/binaryen-version_131/bin" >> "$GITHUB_PATH"
+      - run: pnpm install --frozen-lockfile
+      - run: wasm-opt --version
+      - run: pnpm build:wasm
+      - name: The rebuilt artifact must still match native revm
+        run: pnpm test
+      - name: Report the size delta against the committed artifact
+        run: |
+          git diff --stat -- packages/revm-wasm/wasm/revm.wasm || true
+          node scripts/measure-size.mjs

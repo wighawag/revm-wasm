@@ -1,0 +1,66 @@
+[package]
+name = "revm-wasm-core"
+version = "0.0.0"
+edition = "2021"
+publish = false
+license = "MIT"
+description = "Host-backed revm database, fixed precompile provider and outcome encoding for revm-wasm."
+
+[dependencies]
+revm = { workspace = true, default-features = false }
+
+[features]
+# The shipped configuration. See docs/adr/0001-all-precompiles-opt-level-3.md:
+# a subset build is not a smaller version of this package, it is a different EVM
+# that disagrees with mainnet about gas.
+default = ["precompiles-all"]
+
+# Whatever `Precompiles::new()` yields for the configured spec, i.e. the full
+# mainnet set. THIS IS THE ONE WE SHIP.
+precompiles-all = []
+# ecrecover, sha256, ripemd160, identity, modexp, bn254 add/mul/pairing.
+# MEASUREMENT ONLY: ~6% smaller and not mainnet-gas-equivalent (ADR 0001).
+precompiles-common = []
+# No precompiles at all. MEASUREMENT ONLY, same caveat, more so.
+precompiles-none = []
+
+# Pull in the blst-backed BLS12-381 + KZG implementations (C, but it does build
+# and run correctly under wasm32). Not shipped: it is larger at `-Oz` and its
+# only advantage is at `-O3`, where it is a different crypto backend for the
+# same, already-passing, test vectors. Kept as a measurable option.
+blst = ["revm/blst"]
+std = ["revm/std"]
+
+# revm's optional validation switches, used ONLY by the light `eth_call` path
+# via flag bit 2. Every switch defaults to false, so enabling this feature does
+# not change the behaviour or the gas of any other entry point. Not shipped:
+# the spike measured the relaxation as worth 0.01 microseconds, i.e. nothing.
+relaxed-validation = [
+	"revm/optional_balance_check",
+	"revm/optional_no_base_fee",
+	"revm/optional_block_gas_limit",
+]
+
+# revm's inspector/tracer machinery. NOT part of the v1 API surface: it is here
+# so `scripts/measure-tracer.sh` can price the future capability today. Enabling
+# it links the machinery but nothing calls it, so it measures the floor.
+measure-tracer = ["revm/tracer"]
+
+# ---------------------------------------------------------------------------
+# Measurement-only ablation levers.
+#
+# Each gates a compile-time constant, so LTO deletes the disabled branch
+# entirely and the gzipped delta is a real attribution rather than a guess.
+# NEVER ship an ablated build: each one removes a documented feature.
+#
+# Caveat carried over from the spike (part 3, section 7.2): single-feature gzip
+# deltas below about a kilobyte on a 425 KB artifact are NOT reliable. The same
+# feature measured 238 bytes in one run and 439 in another. Read sub-KB numbers
+# as "sign known, magnitude approximate".
+# ---------------------------------------------------------------------------
+ablate-outcome-v1 = []
+ablate-commit = []
+ablate-extra-exports = []
+ablate-bloom = []
+ablate-fees = []
+ablate-egp = []

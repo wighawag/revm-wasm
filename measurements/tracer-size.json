@@ -1,0 +1,8 @@
+{
+  "measuredAt": "2026-07-31T16:29:55.988Z",
+  "method": "cargo feature ablation, gzip -9 -c, same source both sides",
+  "baselineGz": 420029,
+  "tracerFeatureGz": 422628,
+  "deltaBytes": 2599,
+  "caveat": "The cargo feature alone measures the linking floor: nothing references the inspector machinery, so LTO drops most of it. A tracer that actually buffers a trace would cost MORE than this."
+}

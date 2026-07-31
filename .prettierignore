@@ -1,0 +1,11 @@
+
+dist/
+node_modules/
+
+*.yaml
+*.md
+*.json
+
+# Rust sources and the build output are not prettier's business.
+crates/
+packages/revm-wasm/wasm/
