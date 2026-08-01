@@ -26,7 +26,9 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 ROOT="$PWD"
 
-FEATURES="precompiles-all"
+# The shipped feature set. `--no-default-features` below means this list is the
+# whole configuration, so anything in the crates' `default` belongs here too.
+FEATURES="precompiles-all,relaxed-validation"
 PROFILE="release"
 OUT="$ROOT/packages/revm-wasm/wasm/revm.wasm"
 KEEP_UNOPT=""

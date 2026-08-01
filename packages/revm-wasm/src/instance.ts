@@ -6,7 +6,13 @@ import {
 } from './host.js';
 import {MemoryStore} from './memory-store.js';
 import {decodeOutcome} from './outcome.js';
-import {encodeRequest, Flags, type RequestDefaults} from './request.js';
+import {
+	encodeRequest,
+	Flags,
+	simulationFlags,
+	SIMULATION_FLAGS,
+	type RequestDefaults,
+} from './request.js';
 import {Spec, specToByte, type SpecInput} from './spec.js';
 import type {
 	Address,
@@ -110,6 +116,12 @@ export class Revm {
 	readonly #exports: RawExports;
 	readonly #defaults: RequestDefaults;
 	readonly #store: StateStore | undefined;
+	/**
+	 * Whether this artifact was built with revm's optional validation switches.
+	 * The shipped one is; a custom build might not be, and then the switches are
+	 * silently ignored down in wasm, so they are refused up here instead.
+	 */
+	readonly #hasValidationSwitches: boolean;
 
 	/** What this artifact is. Quote it in a bug report. */
 	readonly info: BuildInfo;
@@ -150,6 +162,11 @@ export class Revm {
 		) as BuildInfo;
 		this.revmVersion = this.info.revm;
 		this.revmRevision = this.info.revmRev;
+		// Read from the artifact rather than assumed, because the loader and the
+		// wasm can be from different builds: `createRevm({wasm})` takes any bytes.
+		this.#hasValidationSwitches = this.info.build.includes(
+			'+relaxed-validation',
+		);
 	}
 
 	/** The store backing this instance, when one was used (rather than a raw host). */
@@ -192,6 +209,30 @@ export class Revm {
 				'revm-wasm: returnState:false cannot be combined with committing',
 			);
 		}
+		if (flags & SIMULATION_FLAGS) {
+			if (flags & Flags.COMMIT) {
+				// Refused rather than honoured: these switches let through a
+				// transaction the chain would reject, and disableBalanceCheck makes
+				// revm raise the caller's balance to cover the value. Committing that
+				// writes funds that never existed into the consumer's own state, and
+				// it would do it silently.
+				throw new Error(
+					'revm-wasm: disableBaseFee / disableBalanceCheck / disableBlockGasLimit are ' +
+						'simulation-only and cannot be combined with committing. Use call(), or ' +
+						'transact({commit: false}) to simulate without writing.',
+				);
+			}
+			if (!this.#hasValidationSwitches) {
+				// Down in wasm an unknown capability is ignored, which here would mean
+				// the very check the caller asked to skip rejecting the call. Said
+				// plainly, once, instead of as a confusing GasPriceLessThanBasefee.
+				throw new Error(
+					`revm-wasm: this artifact (build "${this.info.build}") was built without ` +
+						'`relaxed-validation`, so disableBaseFee / disableBalanceCheck / ' +
+						'disableBlockGasLimit cannot be honoured. Use the shipped revm.wasm.',
+				);
+			}
+		}
 		const blob = this.executeRaw(
 			encodeRequest(options, this.#defaults, flags),
 			{light},
@@ -204,9 +245,22 @@ export class Revm {
 	 *
 	 * This is the `eth_call` / `eth_estimateGas` entry point. The nonce is not
 	 * checked unless you ask for it, which is `eth_call` semantics.
+	 *
+	 * The fee and balance checks, however, are still ON unless you ask otherwise,
+	 * because turning them off is not free of consequences and this package does
+	 * not decide that for you. A node serving `eth_call` generally wants:
+	 *
+	 * ```ts
+	 * evm.call({
+	 *   from, to, data, gasLimit,
+	 *   block: {...realBlock},      // the REAL base fee, not a zeroed one,
+	 *   disableBaseFee: true,       // which these two make servable from an
+	 *   disableBalanceCheck: true,  // address that holds no ether
+	 * });
+	 * ```
 	 */
 	call(options: ExecuteOptions = {}): Outcome {
-		let flags = 0;
+		let flags = simulationFlags(options);
 		if (options.checkNonce) flags |= Flags.CHECK_NONCE;
 		return this.#run(options, flags);
 	}
@@ -225,6 +279,7 @@ export class Revm {
 	transact(options: ExecuteOptions = {}): Outcome {
 		let flags = options.commit === false ? 0 : Flags.COMMIT;
 		if (options.checkNonce !== false) flags |= Flags.CHECK_NONCE;
+		flags |= simulationFlags(options);
 		return this.#run(options, flags);
 	}
 
@@ -240,6 +295,7 @@ export class Revm {
 		let flags = Flags.CREATE;
 		if (options.commit !== false) flags |= Flags.COMMIT;
 		if (options.checkNonce !== false) flags |= Flags.CHECK_NONCE;
+		flags |= simulationFlags(options);
 		return this.#run(options, flags);
 	}
 

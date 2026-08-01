@@ -7,5 +7,6 @@
 | [0003](0003-commit-the-wasm.md) | the built `.wasm` is committed, not built at release | so the tests, and the publish step, need no Rust |
 | [0004](0004-what-v1-leaves-open.md) | what v1 deliberately leaves open, and the rules for adding it | a tracer, custom precompiles and build variants must stay additive |
 | [0005](0005-pinned-toolchain.md) | pin revm, rustc and wasm-opt; accept behaviourally, not byte for byte | three things move the bytes, and the bytes are not the contract |
+| [0006](0006-simulation-switches.md) | expose revm's validation switches, off by default, never committed | a read had to lie about the base fee to be servable at all |
 
 If you are about to change the build configuration, read 0001 first. If you are about to add a capability, read 0004 first.

@@ -34,6 +34,9 @@ const out = evm.call({
   to: contract,
   data: calldata,
   gasLimit: 200_000n,
+  block: {number, timestamp, baseFeePerGas, prevRandao},  // the block's REAL values,
+  disableBaseFee: true,       // which these two make servable from an
+  disableBalanceCheck: true,  // unfunded or zero address
 });
 
 out.success; // boolean
@@ -59,6 +62,22 @@ const receiptish = evm.transact({
 receiptish.effectiveGasPrice; // revm's own, not a second min(maxFee, baseFee + tip)
 receiptish.logsBloom; // 256 bytes, always
 ```
+
+### Serving `eth_call` from a node
+
+A read is not a transaction, and two of the checks a transaction must pass are unsatisfiable for one: `eth_call` defaults `from` to the zero address, callers simulate from addresses that hold no ether, and real blocks carry a non-zero base fee. `disableBaseFee` and `disableBalanceCheck` are revm's own `CfgEnv` switches, which is what upstream clients set for exactly this, and they are the reason you can pass your **real** block environment to a read instead of zeroing the base fee to get past validation:
+
+| option | check it removes | the error you get without it |
+| --- | --- | --- |
+| `disableBaseFee` | `gasPrice >= block base fee` | `GasPriceLessThanBasefee` |
+| `disableBalanceCheck` | `balance >= gasLimit * gasPrice + value` | `LackOfFundForMaxFee` |
+| `disableBlockGasLimit` | `gasLimit <= block gas limit` | `CallerGasLimitMoreThanBlock` |
+
+All three default to `false`, everywhere, so nothing changes for a caller that does not ask. Three things worth knowing before you turn them on:
+
+- **They do not move gas.** The charge is fee-independent, so a read that was passing `baseFeePerGas: 0n` as a workaround gets identical gas after switching to the real base fee plus `disableBaseFee`. What changes is that `block.basefee` inside a view function now reports the truth.
+- **`disableBalanceCheck` invents funds.** revm raises the caller's balance to cover the value being sent, so the sender and recipient balances in `stateChanges` can be numbers the chain never had. Fine for a discarded read.
+- **They cannot be committed.** `transact({commit: true, disableBalanceCheck: true})` throws rather than writing invented funds into your store. Use `call()`, or `transact({commit: false})` to simulate a transaction from an account that cannot pay for it. ([ADR 0006](docs/adr/0006-simulation-switches.md))
 
 ```ts
 // A deployment. `data` is the init code; `to` is ignored.
@@ -151,9 +170,9 @@ If even that is too much marshalling, `createRevm({host: (memory) => ...})` take
 
 | | |
 | --- | --- |
-| `revm.wasm`, raw | 1,226,474 bytes |
-| **gzipped** | **420,025 bytes** |
-| brotli | 306,228 bytes |
+| `revm.wasm`, raw | 1,227,193 bytes |
+| **gzipped** | **420,211 bytes** |
+| brotli | 306,455 bytes |
 
 Measured with `gzip -9 -c <file>`, which is the only invocation used anywhere in this repository. (Node's zlib at level 9 lands about 0.6% higher on these artifacts, and `gzip -c <file>` stores the filename in the header while `gzip -c < file` does not. Both are big enough to fake a 1% delta.)
 
@@ -176,6 +195,7 @@ Per-call overhead is about 3 microseconds for an empty call with a persistent in
 - [ADR 0003: the built `.wasm` is committed, not built at release](docs/adr/0003-commit-the-wasm.md)
 - [ADR 0004: what v1 deliberately leaves open, and the rules for adding it](docs/adr/0004-what-v1-leaves-open.md)
 - [ADR 0005: pin revm, rustc and wasm-opt; accept behaviourally, not byte for byte](docs/adr/0005-pinned-toolchain.md)
+- [ADR 0006: expose revm's validation switches, off by default, never committed](docs/adr/0006-simulation-switches.md)
 - [The wire formats](docs/outcome-format.md) — you should not need this, and it is here anyway
 
 ## Development

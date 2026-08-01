@@ -42,10 +42,22 @@ export interface BlockEnv {
 	timestamp?: bigint;
 	gasLimit?: bigint;
 	coinbase?: Address;
-	/** EIP-1559 base fee per gas. */
+	/**
+	 * EIP-1559 base fee per gas, i.e. what `BASEFEE` reads.
+	 *
+	 * Pass the block's real value even when simulating: `disableBaseFee` exists
+	 * so that a zero-gas-price read no longer has to be paid for with a zero base
+	 * fee, which is a lie a contract can observe.
+	 */
 	baseFeePerGas?: bigint;
-	/** EIP-4844 `excessBlobGas`. Omit to leave revm's default in place. */
+	/** EIP-4844 `excessBlobGas`. Omit for a block that carries no blob gas. */
 	excessBlobGas?: bigint;
+	/**
+	 * EIP-4399 `prevRandao` (the post-merge `mixHash`), i.e. what `PREVRANDAO`
+	 * reads. 32 bytes. Omitted means zero, which is revm's own default and was
+	 * the only value reachable before this option existed.
+	 */
+	prevRandao?: Bytes32;
 }
 
 /**
@@ -116,6 +128,54 @@ export interface ExecuteOptions {
 	 * `call` cannot be made to commit.
 	 */
 	commit?: boolean;
+
+	/**
+	 * Skip the check that the gas price covers the block's base fee (revm's
+	 * `disable_base_fee`, which is what upstream clients set to serve
+	 * `eth_call`). Defaults to `false` everywhere, so nothing changes for a
+	 * caller who does not ask.
+	 *
+	 * This is the switch that lets a node keep its REAL block environment while
+	 * serving a read. Without it, an `eth_call` at gas price 0 against a block
+	 * with a non-zero base fee is rejected with `GasPriceLessThanBasefee`, and
+	 * the only way out is to pass `baseFeePerGas: 0n`, which makes every
+	 * contract that reads `block.basefee` in a view function see a number the
+	 * chain never had.
+	 *
+	 * It suppresses the *check*, not the arithmetic: `effectiveGasPrice` and the
+	 * caller's charge are still revm's own, computed against the base fee you
+	 * passed.
+	 */
+	disableBaseFee?: boolean;
+
+	/**
+	 * Skip the check that the sender can afford `gasLimit * gasPrice + value`
+	 * (revm's `disable_balance_check`). Defaults to `false`.
+	 *
+	 * The other half of `eth_call` semantics: reads are routinely simulated from
+	 * the zero address, or from an address that holds no ether, and rejecting
+	 * those with `LackOfFundForMaxFee` is correct for a transaction and wrong for
+	 * a simulation. Pre-funding the caller instead would invent state that a read
+	 * must not invent.
+	 *
+	 * **It fabricates the caller's balance in the RESULT.** revm raises the
+	 * caller's post-deduction balance to at least `value`, so the balance
+	 * reported for the sender in `stateChanges` can be a number the chain never
+	 * had. Harmless for a discarded read, which is why this may not be combined
+	 * with committing: `transact({commit: true, disableBalanceCheck: true})`
+	 * throws rather than writing invented funds into your store.
+	 */
+	disableBalanceCheck?: boolean;
+
+	/**
+	 * Skip the check that `gasLimit` is at most the block's gas limit (revm's
+	 * `disable_block_gas_limit`). Defaults to `false`.
+	 *
+	 * For an `eth_estimateGas` binary search whose upper bound starts above the
+	 * block's own limit, which is otherwise rejected with
+	 * `CallerGasLimitMoreThanBlock`.
+	 */
+	disableBlockGasLimit?: boolean;
 
 	/**
 	 * Decode logs and state changes. `true` by default.

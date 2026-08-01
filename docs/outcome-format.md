@@ -95,9 +95,14 @@ Integers are little-endian; 256-bit quantities are big-endian.
 | --- | --- | --- |
 | 0 | `COMMIT` | write the resulting state back through the host before returning |
 | 1 | `CREATE` | contract creation: `to` is ignored, calldata is the init code |
-| 2 | `RELAX_VALIDATION` | light path only; needs the `relaxed-validation` cargo feature, which the shipped build does not enable |
+| 2 | `RELAX_VALIDATION` | bits 4, 5 and 6 at once; predates them and keeps its meaning (ADR 0004) |
 | 3 | `CHECK_NONCE` | enforce the nonce against the sender's account nonce |
-| 4+ | reserved | unallocated; an artifact that does not know a bit ignores it |
+| 4 | `DISABLE_BASE_FEE` | skip `gasPrice >= block base fee` (revm `disable_base_fee`) |
+| 5 | `DISABLE_BALANCE_CHECK` | skip `balance >= gasLimit * gasPrice + value` (revm `disable_balance_check`) |
+| 6 | `DISABLE_BLOCK_GAS_LIMIT` | skip `gasLimit <= block gas limit` (revm `disable_block_gas_limit`) |
+| 7+ | reserved | unallocated; an artifact that does not know a bit ignores it |
+
+Bits 4 to 6 need the `relaxed-validation` cargo feature, which the shipped build enables. An artifact built without it ignores them, and the check the caller asked to skip then rejects the transaction with revm's own reason: loud, never a silently different number. The TypeScript layer refuses the options up front in that case, and refuses them on any committing path (see ADR 0006).
 
 `CHECK_NONCE` is off in the raw ABI unless set. The TypeScript layer defaults it **on** for `transact` and `create` and **off** for `call`, because a transaction executed without a nonce check is silently replayable and that is not a default worth shipping.
 
@@ -107,7 +112,8 @@ Omitted entirely when a call has nothing to say, which is how a zero-fee corpus 
 
 ```text
 0    u8   version (1)
-1    u8   present: bit0 priority fee, bit1 explicit tx type, bit2 excess blob gas
+1    u8   present: bit0 priority fee, bit1 explicit tx type, bit2 excess blob gas,
+              bit3 prevRandao (appended after the authorization list)
 2    u8   tx type (meaningful only if bit1)
 3    u8   reserved
 4    [16] gas price / max fee per gas (BE)
@@ -120,7 +126,10 @@ Omitted entirely when a call has nothing to say, which is how a zero-fee corpus 
 +    u32  blob hashes, then [32] * that many
 +    u32  authorizations, then per authorization:
            [32] chain id (BE), [20] address, u64 nonce (LE), u8 yParity, [32] r, [32] s
++    [32] prevRandao, present only if `present` bit3 is set
 ```
+
+`prevRandao` is **appended after the variable-length sections**, not placed in the fixed head, which is why the version byte stays at 1. An artifact that predates it reads the sections it knows, ignores the `present` bit it does not, and stops: it degrades to "the capability did not happen" rather than misreading the blob. Same discipline as the outcome format, for the same reason.
 
 **`undefined` and `0` are not interchangeable** for the priority fee, the transaction type and `excessBlobGas`. The *presence* of a priority fee is what makes revm derive a 1559-family transaction type, which is why there is a `present` bitmask rather than a sentinel value.
 

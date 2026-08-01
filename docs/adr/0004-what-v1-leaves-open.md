@@ -30,9 +30,9 @@ That discipline is the only reason a downstream decoder survived v1 to v2 to v3 
 
 See `docs/outcome-format.md` for the layout and for the two conditional fields a hand-rolled decoder gets wrong.
 
-### 3. Flag-word bits 4 and above are unallocated
+### 3. Flag-word bits 7 and above are unallocated
 
-The per-call flag word currently uses four bits:
+The per-call flag word currently uses seven bits:
 
 | bit | name |
 | --- | --- |
@@ -40,10 +40,15 @@ The per-call flag word currently uses four bits:
 | 1 | `CREATE` |
 | 2 | `RELAX_VALIDATION` |
 | 3 | `CHECK_NONCE` |
+| 4 | `DISABLE_BASE_FEE` |
+| 5 | `DISABLE_BALANCE_CHECK` |
+| 6 | `DISABLE_BLOCK_GAS_LIMIT` |
 
-**Bits 4 and above are reserved and unallocated.** A future capability can be enabled per call by setting a new bit, with no new argument and no change to any signature. An artifact that does not know a bit ignores it, so an older artifact paired with a newer caller degrades to "the capability did not happen" rather than trapping.
+**Bits 7 and above are reserved and unallocated.** A future capability can be enabled per call by setting a new bit, with no new argument and no change to any signature. An artifact that does not know a bit ignores it, so an older artifact paired with a newer caller degrades to "the capability did not happen" rather than trapping.
 
-Bit 2 stays allocated even though the shipped build does not enable the `relaxed-validation` cargo feature, so that the meaning of bit 2 can never be quietly reused for something else.
+Bits 4 to 6 were spent exactly that way, in the release after this ADR, and are the worked example of the mechanism: three new options on `ExecuteOptions`, no signature changed, no format version bumped ([ADR 0006](0006-simulation-switches.md)). Bit 2 kept its meaning rather than being reused for one of them: it is now defined as all three at once, which is what it always described.
+
+> Written when the shipped build did not enable the `relaxed-validation` cargo feature. It now does, because those switches turned out to be load-bearing for correctness rather than for speed. The rule that produced the right outcome here is the one above: bit 2 was left allocated, so nothing had to be renumbered.
 
 ### 4. The request blob has the same discipline
 

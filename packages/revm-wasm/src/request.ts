@@ -4,7 +4,7 @@ import type {BlockEnv, ExecuteOptions} from './types.js';
 /**
  * Per-call flag bits. These mirror `revm_wasm_core::flags` exactly.
  *
- * **Bits 4 and above are unallocated and reserved**, on purpose. A future
+ * **Bits 7 and above are unallocated and reserved**, on purpose. A future
  * per-call capability (a trace, a build-variant switch, a custom-precompile
  * opt-in) can be enabled by setting a new bit, with no new argument and no
  * breaking change at any entry point. An artifact that does not know a bit
@@ -14,10 +14,40 @@ import type {BlockEnv, ExecuteOptions} from './types.js';
 export const Flags = {
 	COMMIT: 1 << 0,
 	CREATE: 1 << 1,
-	/** Requires a build with `relaxed-validation`, which the shipped one is not. */
+	/** All three simulation switches at once. Predates the individual bits. */
 	RELAX_VALIDATION: 1 << 2,
 	CHECK_NONCE: 1 << 3,
+	/** `disableBaseFee`: skip `gasPrice >= baseFee`. */
+	DISABLE_BASE_FEE: 1 << 4,
+	/** `disableBalanceCheck`: skip `balance >= gasLimit * gasPrice + value`. */
+	DISABLE_BALANCE_CHECK: 1 << 5,
+	/** `disableBlockGasLimit`: skip `gasLimit <= block gas limit`. */
+	DISABLE_BLOCK_GAS_LIMIT: 1 << 6,
 } as const;
+
+/**
+ * The bits that relax transaction validation, i.e. the ones that make an
+ * execution a simulation rather than a transaction. Grouped because the entry
+ * points have to refuse all of them on a committing path for the same reason.
+ */
+export const SIMULATION_FLAGS =
+	Flags.RELAX_VALIDATION |
+	Flags.DISABLE_BASE_FEE |
+	Flags.DISABLE_BALANCE_CHECK |
+	Flags.DISABLE_BLOCK_GAS_LIMIT;
+
+/**
+ * Resolve the simulation switches an options object asks for. Every one of them
+ * defaults to off, so an options object that says nothing produces 0 and takes
+ * exactly the path it took before these existed.
+ */
+export function simulationFlags(o: ExecuteOptions): number {
+	let flags = 0;
+	if (o.disableBaseFee) flags |= Flags.DISABLE_BASE_FEE;
+	if (o.disableBalanceCheck) flags |= Flags.DISABLE_BALANCE_CHECK;
+	if (o.disableBlockGasLimit) flags |= Flags.DISABLE_BLOCK_GAS_LIMIT;
+	return flags;
+}
 
 /** Fixed head of the request blob. Offsets 0..140 never move within version 1. */
 const REQ_HEAD = 140;
@@ -101,7 +131,8 @@ function needsExtras(o: ExecuteOptions, block: BlockEnv): boolean {
 		o.maxFeePerBlobGas !== undefined ||
 		(o.authorizationList !== undefined && o.authorizationList.length > 0) ||
 		(block.baseFeePerGas !== undefined && block.baseFeePerGas !== 0n) ||
-		block.excessBlobGas !== undefined
+		block.excessBlobGas !== undefined ||
+		block.prevRandao !== undefined
 	);
 }
 
@@ -110,17 +141,24 @@ function encodeExtras(o: ExecuteOptions, block: BlockEnv): Uint8Array {
 	const blobHashes = o.blobVersionedHashes ?? [];
 	const auths = o.authorizationList ?? [];
 
+	const prevRandao = block.prevRandao;
+
 	let size = TX_EXTRAS_HEAD + 4;
 	for (const e of accessList)
 		size += 20 + 4 + 32 * (e.storageKeys?.length ?? 0);
 	size += 4 + 32 * blobHashes.length;
 	size += 4 + 125 * auths.length;
+	// Appended after the variable-length sections, never inserted into the head:
+	// an artifact that predates it reads the sections it knows, ignores the
+	// `present` bit it does not, and stops. Same discipline as the outcome format.
+	if (prevRandao !== undefined) size += 32;
 
 	const out = new Uint8Array(size);
 	let present = 0;
 	if (o.maxPriorityFeePerGas !== undefined) present |= 1;
 	if (o.txType !== undefined) present |= 2;
 	if (block.excessBlobGas !== undefined) present |= 4;
+	if (prevRandao !== undefined) present |= 8;
 
 	out[0] = TX_EXTRAS_VERSION;
 	out[1] = present;
@@ -171,6 +209,10 @@ function encodeExtras(o: ExecuteOptions, block: BlockEnv): Uint8Array {
 		copyRight(out, p, 32, a.r);
 		p += 32;
 		copyRight(out, p, 32, a.s);
+		p += 32;
+	}
+	if (prevRandao !== undefined) {
+		copyRight(out, p, 32, prevRandao);
 		p += 32;
 	}
 	if (p !== size) throw new Error('revm-wasm: extras encoder length mismatch');

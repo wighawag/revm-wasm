@@ -45,7 +45,7 @@ pub use revm;
 /// Per-request behaviour switches. Deliberately explicit: an `eth_call` must
 /// never commit, a transaction always must, and the caller decides which it is.
 ///
-/// **Bits 4 and above are unallocated and reserved.** That is a forward
+/// **Bits 7 and above are unallocated and reserved.** That is a forward
 /// compatibility guarantee, not an accident: a future per-call capability (a
 /// trace, a size-variant switch, a custom-precompile opt-in) can be enabled by
 /// setting a new bit, without adding an argument and without a breaking change
@@ -59,11 +59,15 @@ pub mod flags {
     /// The transaction is a contract creation: `to` is ignored and `data` is the
     /// init code.
     pub const CREATE: u32 = 1 << 1;
-    /// Light path only: relax transaction-level validation that an `eth_call`
-    /// does not need. Requires the `relaxed-validation` cargo feature, which the
-    /// shipped build does NOT enable, because the spike measured the relaxation
-    /// as worth 0.01 microseconds. The bit stays allocated so the meaning of
-    /// bit 2 never gets reused for something else.
+    /// All three simulation switches at once, i.e. exactly
+    /// `DISABLE_BASE_FEE | DISABLE_BALANCE_CHECK | DISABLE_BLOCK_GAS_LIMIT`.
+    ///
+    /// This bit predates them: it was the light path's single all-or-nothing
+    /// relaxation, back when the relaxation was a measurement rather than a
+    /// capability. It keeps its meaning (a superset shortcut) rather than being
+    /// reused for something else, per ADR 0004, and now applies on both paths.
+    /// New callers should set the individual bits, because an `eth_call` that
+    /// skips the base fee usually still wants the block gas limit enforced.
     pub const RELAX_VALIDATION: u32 = 1 << 2;
     /// Enforce the transaction nonce against the sender's account nonce.
     ///
@@ -72,6 +76,64 @@ pub mod flags {
     /// unconditionally would move results for the whole existing corpus. A real
     /// transaction should set it; an `eth_call` should not.
     pub const CHECK_NONCE: u32 = 1 << 3;
+
+    // -- simulation switches ------------------------------------------------
+    //
+    // revm's own `CfgEnv` fields, which is what upstream clients set to serve
+    // `eth_call`. Each is OFF unless the bit is set, so the default behaviour of
+    // every entry point is unchanged, and each requires the `relaxed-validation`
+    // cargo feature (which the shipped build DOES enable; see Cargo.toml).
+    // Without it the corresponding `CfgEnv` field does not exist and the bit is
+    // ignored, which fails loudly as a rejected transaction rather than quietly
+    // as a wrong number.
+
+    /// Skip the `gasPrice >= block base fee` check (revm `disable_base_fee`),
+    /// so a zero-gas-price simulation can run against a block that carries a
+    /// real, non-zero base fee and still see that base fee from `BASEFEE`.
+    ///
+    /// It suppresses the *check* only. The fee arithmetic is untouched, so the
+    /// effective gas price and the caller's charge are still revm's own.
+    pub const DISABLE_BASE_FEE: u32 = 1 << 4;
+    /// Skip the `balance >= gasLimit * gasPrice + value` check (revm
+    /// `disable_balance_check`), so a simulation from an address that holds no
+    /// ether is possible.
+    ///
+    /// **This one fabricates state**: revm's `calculate_caller_fee` raises the
+    /// caller's post-deduction balance to at least `tx.value()`, so the caller's
+    /// balance in the returned state map can be a number the chain never had.
+    /// That is fine for a discarded read and is why the TypeScript layer refuses
+    /// to combine it with a commit.
+    pub const DISABLE_BALANCE_CHECK: u32 = 1 << 5;
+    /// Skip the `tx gasLimit <= block gasLimit` check (revm
+    /// `disable_block_gas_limit`), which an `eth_estimateGas` binary search
+    /// starting above the block's own limit would otherwise trip.
+    pub const DISABLE_BLOCK_GAS_LIMIT: u32 = 1 << 6;
+}
+
+/// The transaction-level validations a simulation may switch off, resolved from
+/// a request's [`flags`].
+///
+/// A struct rather than three booleans threaded by hand, because the full path
+/// and the light path must resolve them identically: the executor is persistent,
+/// so a switch left set from a previous call is a silent cross-call leak.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ValidationSwitches {
+    pub base_fee: bool,
+    pub balance: bool,
+    pub block_gas_limit: bool,
+}
+
+impl ValidationSwitches {
+    /// Resolve from a flag word. [`flags::RELAX_VALIDATION`] sets all three.
+    #[inline]
+    pub fn from_flags(f: u32) -> Self {
+        let all = f & flags::RELAX_VALIDATION != 0;
+        Self {
+            base_fee: all || f & flags::DISABLE_BASE_FEE != 0,
+            balance: all || f & flags::DISABLE_BALANCE_CHECK != 0,
+            block_gas_limit: all || f & flags::DISABLE_BLOCK_GAS_LIMIT != 0,
+        }
+    }
 }
 
 /// Narrow, synchronous host interface. Every method writes its result into a
@@ -520,8 +582,13 @@ pub struct TxExtras {
     pub authorization_list: Vec<Either<SignedAuthorization, RecoveredAuthorization>>,
     /// Block base fee per gas (EIP-1559).
     pub basefee: u64,
-    /// Block `excessBlobGas`. `None` leaves revm's `BlockEnv` default in place.
+    /// Block `excessBlobGas`. `None` means "this block has none", which resets
+    /// it rather than leaving the previous call's value in place: the executor
+    /// is persistent, so anything not assigned on every call is sticky.
     pub excess_blob_gas: Option<u64>,
+    /// Block `prevRandao` (EIP-4399), what `PREVRANDAO` reads post-merge.
+    /// `None` means zero, which is revm's own `BlockEnv` default.
+    pub prev_randao: Option<B256>,
 }
 
 /// Version byte of the encoded extras blob. Bumped if the layout ever changes;
@@ -548,7 +615,8 @@ impl TxExtras {
     ///
     /// ```text
     /// u8    version (must be TX_EXTRAS_VERSION)
-    /// u8    present: bit0 gas_priority_fee, bit1 tx_type, bit2 excess_blob_gas
+    /// u8    present: bit0 gas_priority_fee, bit1 tx_type, bit2 excess_blob_gas,
+    ///               bit3 prev_randao (appended after the authorization list)
     /// u8    tx_type          (meaningful only if bit1)
     /// u8    reserved (0)
     /// [16]  gas_price / max_fee_per_gas, big-endian
@@ -563,7 +631,16 @@ impl TxExtras {
     /// u32   authorization count, then per authorization:
     ///         [32] chain id big-endian, [20] address, u64 nonce little-endian,
     ///         u8 y_parity, [32] r big-endian, [32] s big-endian
+    /// [32]  prev_randao, present only if bit3 of `present` is set
     /// ```
+    ///
+    /// `prev_randao` is APPENDED after the variable-length sections rather than
+    /// placed in the fixed head, which is the same discipline the request and
+    /// outcome blobs follow, and for the same reason: the head keeps its offsets
+    /// and the version byte does not have to move. An older artifact reads the
+    /// sections it knows, ignores an unknown `present` bit and stops at the end
+    /// of the authorization list, so it degrades to "the capability did not
+    /// happen" rather than misreading the blob.
     ///
     /// Everything is little-endian for the machine-word fields and big-endian
     /// for the 256-bit ones, matching the existing outcome blob so the harness
@@ -589,6 +666,7 @@ impl TxExtras {
             excess_blob_gas: (present & 4 != 0).then(|| read_u64_le(&buf[68..76])),
             ..Default::default()
         };
+        let has_prev_randao = present & 8 != 0;
 
         let mut o = TX_EXTRAS_HEAD;
         // -- access list --
@@ -661,6 +739,12 @@ impl TxExtras {
         }
         out.authorization_list = auths;
 
+        // -- appended sections --
+        if has_prev_randao {
+            need(o, 32, buf)?;
+            out.prev_randao = Some(B256::from_slice(&buf[o..o + 32]));
+        }
+
         Ok(out)
     }
 }
@@ -712,19 +796,29 @@ impl CallRequest {
 /// fee in particular used to be pinned to zero in two separate places.
 /// `blob_fraction` comes from `CfgEnv::blob_base_fee_update_fraction()`, which is
 /// spec aware (Cancun vs Prague), so the blob gas price is revm's.
+///
+/// **Every field is assigned on every call, never conditionally.** The executor
+/// is persistent (see [`CallExecutor`]), so a field that is only written when
+/// the caller supplies it keeps the *previous* call's value, and a block
+/// environment that depends on what was executed before it is not a block
+/// environment. `excess_blob_gas` used to be written that way.
 fn apply_block(block: &mut BlockEnv, blob_fraction: u64, req: &CallRequest) {
     block.number = U256::from(req.block_number);
     block.timestamp = U256::from(req.block_timestamp);
     block.gas_limit = req.block_gas_limit;
     block.beneficiary = Address::from(req.coinbase);
+    // Always `Some`: revm's `PREVRANDAO` instruction unwraps it, and `None` is
+    // reserved for a pre-merge block environment this package does not build.
+    // Absent means zero, which is revm's own `BlockEnv` default.
+    block.prevrandao = Some(req.extras.prev_randao.unwrap_or(B256::ZERO));
     if !FEES_ENABLED {
         block.basefee = 0;
         return;
     }
     block.basefee = req.extras.basefee;
-    if let Some(excess) = req.extras.excess_blob_gas {
-        block.set_blob_excess_gas_and_price(excess, blob_fraction);
-    }
+    // Absent means zero excess, whose blob gas price is the 1 wei minimum, i.e.
+    // revm's default for a block that carries no blob gas.
+    block.set_blob_excess_gas_and_price(req.extras.excess_blob_gas.unwrap_or(0), blob_fraction);
 }
 
 // ---------------------------------------------------------------------------
@@ -791,11 +885,34 @@ impl<H: HostDb> CallExecutor<H> {
         Self { evm }
     }
 
-    /// Spec is fixed at construction; changing it requires a new executor.
-    pub fn execute(&mut self, req: &CallRequest) -> Vec<u8> {
+    /// Apply one request's environment to the persistent EVM.
+    ///
+    /// Shared by both execution paths, and every field it touches is written
+    /// unconditionally. The executor outlives the request, so "leave it alone
+    /// when the caller did not ask" means "inherit it from whatever ran last",
+    /// which is a cross-call leak rather than a default.
+    fn apply_env(&mut self, req: &CallRequest) {
         let blob_fraction = self.evm.ctx.cfg.blob_base_fee_update_fraction();
         apply_block(&mut self.evm.ctx.block, blob_fraction, req);
         self.evm.ctx.cfg.disable_nonce_check = !req.checks_nonce();
+
+        let switches = ValidationSwitches::from_flags(req.flags);
+        #[cfg(feature = "relaxed-validation")]
+        {
+            self.evm.ctx.cfg.disable_base_fee = switches.base_fee;
+            self.evm.ctx.cfg.disable_balance_check = switches.balance;
+            self.evm.ctx.cfg.disable_block_gas_limit = switches.block_gas_limit;
+        }
+        // Without the feature the `CfgEnv` fields do not exist, so the request
+        // asked for a capability this artifact does not have. It is ignored, and
+        // the check it asked to skip then rejects the transaction with revm's own
+        // reason: loud, and never a silently different number.
+        let _ = switches;
+    }
+
+    /// Spec is fixed at construction; changing it requires a new executor.
+    pub fn execute(&mut self, req: &CallRequest) -> Vec<u8> {
+        self.apply_env(req);
 
         let tx = match build_tx(req) {
             Ok(tx) => tx,
@@ -825,26 +942,15 @@ impl<H: HostDb> CallExecutor<H> {
     }
 
     /// Lighter `eth_call` path: identical execution, but the state map is
-    /// dropped instead of being sorted and encoded, and `flags::RELAX_VALIDATION`
-    /// can additionally turn off the balance and base-fee checks that an
-    /// `eth_call` does not need.
+    /// dropped instead of being sorted and encoded.
     ///
     /// Returns only the head of the outcome blob (status, gas, return data). It
-    /// exists purely to measure how much of the per-call floor is state
-    /// encoding and how much is transaction validation; it never commits.
+    /// never commits. The simulation switches are resolved by
+    /// [`CallExecutor::apply_env`], exactly as on the full path: which
+    /// validations run is a property of the request, not of which encoding the
+    /// caller wanted back.
     pub fn execute_light(&mut self, req: &CallRequest) -> Vec<u8> {
-        let blob_fraction = self.evm.ctx.cfg.blob_base_fee_update_fraction();
-        apply_block(&mut self.evm.ctx.block, blob_fraction, req);
-        self.evm.ctx.cfg.disable_nonce_check = !req.checks_nonce();
-
-        let relax = req.flags & flags::RELAX_VALIDATION != 0;
-        #[cfg(feature = "relaxed-validation")]
-        {
-            self.evm.ctx.cfg.disable_balance_check = relax;
-            self.evm.ctx.cfg.disable_base_fee = relax;
-            self.evm.ctx.cfg.disable_block_gas_limit = relax;
-        }
-        let _ = relax;
+        self.apply_env(req);
 
         let tx = match build_tx(req) {
             Ok(tx) => tx,

@@ -27,7 +27,7 @@ export {Spec} from './spec.js';
 export type {SpecInput, SpecName} from './spec.js';
 
 export {decodeOutcome, OUTCOME_FORMAT_VERSION} from './outcome.js';
-export {encodeRequest, Flags} from './request.js';
+export {encodeRequest, Flags, SIMULATION_FLAGS} from './request.js';
 export type {RequestDefaults} from './request.js';
 
 export type {

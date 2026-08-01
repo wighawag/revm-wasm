@@ -27,7 +27,7 @@ revm-wasm-core = { workspace = true, default-features = false }
 getrandom = { version = "0.2", features = ["custom"], optional = true }
 
 [features]
-default = ["precompiles-all"]
+default = ["precompiles-all", "relaxed-validation"]
 
 precompiles-all = ["revm-wasm-core/precompiles-all"]
 precompiles-common = ["revm-wasm-core/precompiles-common"]

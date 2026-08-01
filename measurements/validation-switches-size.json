@@ -1,0 +1,17 @@
+{
+  "measuredAt": "2026-08-01T18:27:00.000Z",
+  "method": "cargo feature ablation, gzip -9 -c, same source both sides, same rustc 1.91.1 and wasm-opt 131",
+  "shipped": {
+    "features": "precompiles-all,relaxed-validation",
+    "rawOptimised": 1227193,
+    "gz": 420211
+  },
+  "without": {
+    "features": "precompiles-all",
+    "rawOptimised": 1226828,
+    "gz": 420280
+  },
+  "deltaRawBytes": 365,
+  "deltaGzBytes": -69,
+  "caveat": "The gzipped delta is NEGATIVE, which is not a saving: it is the noise floor. Sub-kilobyte deltas on a 420 KB artifact are not trustworthy (the spike measured the same feature at 238 bytes in one run and 439 in another). Report as: a few hundred bytes uncompressed, nothing measurable compressed. The three revm CfgEnv fields the feature adds are `false` by default and revm's is_*_disabled() accessors return the same values as when the fields do not exist, so the behavioural cost is zero and the recorded corpus is byte-identical."
+}

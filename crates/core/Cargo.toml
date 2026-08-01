@@ -13,7 +13,7 @@ revm = { workspace = true, default-features = false }
 # The shipped configuration. See docs/adr/0001-all-precompiles-opt-level-3.md:
 # a subset build is not a smaller version of this package, it is a different EVM
 # that disagrees with mainnet about gas.
-default = ["precompiles-all"]
+default = ["precompiles-all", "relaxed-validation"]
 
 # Whatever `Precompiles::new()` yields for the configured spec, i.e. the full
 # mainnet set. THIS IS THE ONE WE SHIP.
@@ -31,10 +31,25 @@ precompiles-none = []
 blst = ["revm/blst"]
 std = ["revm/std"]
 
-# revm's optional validation switches, used ONLY by the light `eth_call` path
-# via flag bit 2. Every switch defaults to false, so enabling this feature does
-# not change the behaviour or the gas of any other entry point. Not shipped:
-# the spike measured the relaxation as worth 0.01 microseconds, i.e. nothing.
+# revm's optional validation switches, reachable per request through flag bits
+# 4, 5 and 6 (and the legacy bit 2, which sets all three).
+#
+# SHIPPED, and part of `default`. It was measurement-only while the relaxation
+# had no consumer: the spike priced it at 0.01 microseconds, i.e. nothing, and a
+# capability worth nothing in time was not worth its bytes. What changed is that
+# the switches turned out to be load-bearing for correctness rather than for
+# speed: a node serving `eth_call` cannot satisfy the base-fee and balance checks
+# in the general case (the caller defaults to the zero address and holds no
+# ether), so without them it has to pass `basefee: 0` and lie to every contract
+# that reads `block.basefee`.
+#
+# Every switch still defaults to false, so enabling this feature changes the
+# behaviour and the gas of NOTHING that does not explicitly ask: the `CfgEnv`
+# fields it adds are `false`, and revm's `is_*_disabled()` accessors return
+# exactly what they return when the fields do not exist at all.
+#
+# A build WITHOUT it is the size baseline for what the switches cost:
+#   scripts/build-wasm.sh --features precompiles-all --out /tmp/no-switches.wasm
 relaxed-validation = [
 	"revm/optional_balance_check",
 	"revm/optional_no_base_fee",
