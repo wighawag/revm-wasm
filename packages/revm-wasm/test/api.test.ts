@@ -517,7 +517,11 @@ describe('the simulation switches (eth_call semantics)', () => {
 
 		// The same call from the contract address succeeds once EIP-3607 is
 		// disabled, and returns the same value the EOA caller got.
-		const ok = evm.call({from: CONTRACT_CALLER, ...options, disableEip3607: true});
+		const ok = evm.call({
+			from: CONTRACT_CALLER,
+			...options,
+			disableEip3607: true,
+		});
 		expect(ok.success).toBe(true);
 		expect(asWord(ok.returnData)).toBe(0x2an);
 		expect(ok.gasUsed).toBe(eoa.gasUsed);
@@ -592,7 +596,7 @@ describe('the simulation switches (eth_call semantics)', () => {
 					defaults,
 					Flags.DISABLE_BASE_FEE |
 						Flags.DISABLE_BALANCE_CHECK |
-					Flags.DISABLE_BLOCK_GAS_LIMIT,
+						Flags.DISABLE_BLOCK_GAS_LIMIT,
 				),
 			),
 		).toEqual(
