@@ -869,7 +869,14 @@ impl<H: HostDb> CallExecutor<H> {
         let ctx = Context::mainnet()
             .with_db(HostDatabase::new(host))
             .modify_cfg_chained(|c| {
-                c.spec = spec;
+                // `spec` and `gas_params` are independent `CfgEnv` fields; setting
+                // `c.spec` alone leaves `gas_params` at the `Context::mainnet()`
+                // default (`SpecId::OSAKA`), so the intrinsic-gas table still has
+                // EIP-3860's initcode word cost (Shanghai) and EIP-7623's calldata
+                // floor (Prague) on earlier forks. `set_spec_and_mainnet_gas_params`
+                // rebuilds the gas table for the requested spec and also enables
+                // EIP-8037/EIP-2780 for AMSTERDAM and later. (GitHub issue #4.)
+                c.set_spec_and_mainnet_gas_params(spec);
                 c.chain_id = chain_id;
                 // Default is `eth_call` semantics: the caller is not required
                 // to have a valid nonce. `flags::CHECK_NONCE` opts a real
