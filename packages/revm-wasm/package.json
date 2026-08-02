@@ -1,6 +1,6 @@
 {
 	"name": "revm-wasm",
-	"version": "0.2.0",
+	"version": "0.3.0",
 	"description": "UNOFFICIAL binding: revm (bluealloy, MIT) compiled to WebAssembly, with a typed JavaScript API. No Rust toolchain required.",
 	"license": "MIT",
 	"author": "wighawag",
