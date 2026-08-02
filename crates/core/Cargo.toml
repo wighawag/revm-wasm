@@ -32,7 +32,7 @@ blst = ["revm/blst"]
 std = ["revm/std"]
 
 # revm's optional validation switches, reachable per request through flag bits
-# 4, 5 and 6 (and the legacy bit 2, which sets all three).
+# 4, 5, 6 and 7 (and the legacy bit 2, which sets the original three).
 #
 # SHIPPED, and part of `default`. It was measurement-only while the relaxation
 # had no consumer: the spike priced it at 0.01 microseconds, i.e. nothing, and a
@@ -54,6 +54,7 @@ relaxed-validation = [
 	"revm/optional_balance_check",
 	"revm/optional_no_base_fee",
 	"revm/optional_block_gas_limit",
+	"revm/optional_eip3607",
 ]
 
 # revm's inspector/tracer machinery. NOT part of the v1 API surface: it is here

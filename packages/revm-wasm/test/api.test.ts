@@ -473,6 +473,7 @@ describe('the simulation switches (eth_call semantics)', () => {
 				disableBaseFee: false,
 				disableBalanceCheck: false,
 				disableBlockGasLimit: false,
+				disableEip3607: false,
 			}).returnData,
 		);
 		expect(
@@ -483,6 +484,119 @@ describe('the simulation switches (eth_call semantics)', () => {
 				{spec: Spec.CANCUN, chainId: 1n, block: {}},
 				0,
 			),
+		);
+	});
+
+	// PUSH1 0x2a; PUSH1 0; MSTORE; PUSH1 0x20; PUSH1 0; RETURN — returns 0x2a
+	const RETURN_2A = unhex('602a60005260206000f3');
+	// A one-byte STOP, i.e. the thinnest code an account can carry and still be
+	// a contract for EIP-3607 purposes.
+	const STOP = unhex('00');
+
+	it('rejects a call from a contract address (EIP-3607) unless asked not to', () => {
+		// EIP-3607 rejects a sender that has deployed code. It is a transaction-
+		// validity rule, not an execution rule, but revm applies it on the call
+		// path too. Same call twice, only the sender differs: an EOA, then an
+		// account holding a one-byte STOP. The EOA succeeds; the contract is
+		// rejected with RejectCallerWithCode.
+		const CONTRACT_CALLER = addr('c0de');
+		const {evm} = evmWith([
+			{address: CALLER},
+			{address: CONTRACT_CALLER, code: STOP},
+			{address: TARGET, code: RETURN_2A},
+		]);
+		const options = {to: TARGET, gasLimit: 100_000n};
+
+		const eoa = evm.call({from: CALLER, ...options});
+		expect(eoa.success).toBe(true);
+		expect(asWord(eoa.returnData)).toBe(0x2an);
+
+		const contract = evm.call({from: CONTRACT_CALLER, ...options});
+		expect(contract.status).toBe('validation-error');
+		expect(contract.error).toContain('RejectCallerWithCode');
+
+		// The same call from the contract address succeeds once EIP-3607 is
+		// disabled, and returns the same value the EOA caller got.
+		const ok = evm.call({from: CONTRACT_CALLER, ...options, disableEip3607: true});
+		expect(ok.success).toBe(true);
+		expect(asWord(ok.returnData)).toBe(0x2an);
+		expect(ok.gasUsed).toBe(eoa.gasUsed);
+	});
+
+	it('disableEip3607 does not leak into the next call on the same instance', () => {
+		// The executor is persistent, so a CfgEnv field set for one call and not
+		// cleared would silently relax every call after it.
+		const CONTRACT_CALLER = addr('c0de');
+		const {evm} = evmWith([
+			{address: CONTRACT_CALLER, code: STOP},
+			{address: TARGET, code: RETURN_2A},
+		]);
+		const options = {from: CONTRACT_CALLER, to: TARGET, gasLimit: 100_000n};
+
+		expect(evm.call({...options, disableEip3607: true}).success).toBe(true);
+
+		const after = evm.call(options);
+		expect(after.status).toBe('validation-error');
+		expect(after.error).toContain('RejectCallerWithCode');
+	});
+
+	it('refuses to commit an execution that skipped EIP-3607', () => {
+		// Like the other simulation switches, disabling EIP-3607 admits a
+		// transaction the chain would reject (one sent from a contract address),
+		// so it may not be combined with committing.
+		const CONTRACT_CALLER = addr('c0de');
+		const {evm, state} = evmWith([
+			{address: CONTRACT_CALLER, code: STOP},
+			{address: TARGET, code: STORE_ONE},
+		]);
+		const options = {
+			from: CONTRACT_CALLER,
+			to: TARGET,
+			gasLimit: 100_000n,
+			disableEip3607: true,
+		};
+		expect(() => evm.transact(options)).toThrow(/simulation-only/);
+		expect(() => evm.create({...options, data: DEPLOY_RETURN_42})).toThrow(
+			/simulation-only/,
+		);
+		expect(state.getAccount(TARGET)!.balance).toBe(10n ** 20n);
+
+		// The explicitly non-committing simulation is allowed.
+		const simulated = evm.transact({...options, commit: false});
+		expect(simulated.success).toBe(true);
+	});
+
+	it('RELAX_VALIDATION does not set disableEip3607', () => {
+		// Bit 2's meaning is fixed by ADR 0004 as the union of the three switches
+		// it always described. Adding EIP-3607 to it would silently change every
+		// caller that sets it, so EIP-3607 is opted into individually.
+		const CONTRACT_CALLER = addr('c0de');
+		const {evm} = evmWith([
+			{address: CONTRACT_CALLER, code: STOP},
+			{address: TARGET, code: RETURN_2A},
+		]);
+		const options = {from: CONTRACT_CALLER, to: TARGET, gasLimit: 100_000n};
+		const defaults = {spec: Spec.CANCUN, chainId: 1n, block: {}};
+
+		const relaxed = decodeOutcome(
+			evm.executeRaw(encodeRequest(options, defaults, Flags.RELAX_VALIDATION)),
+		);
+		expect(relaxed.status).toBe('validation-error');
+		expect(relaxed.error).toContain('RejectCallerWithCode');
+
+		// And spelling out the three switches is identical, as ADR 0006 requires.
+		expect(
+			evm.executeRaw(
+				encodeRequest(
+					options,
+					defaults,
+					Flags.DISABLE_BASE_FEE |
+						Flags.DISABLE_BALANCE_CHECK |
+					Flags.DISABLE_BLOCK_GAS_LIMIT,
+				),
+			),
+		).toEqual(
+			evm.executeRaw(encodeRequest(options, defaults, Flags.RELAX_VALIDATION)),
 		);
 	});
 });

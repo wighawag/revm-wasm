@@ -178,6 +178,27 @@ export interface ExecuteOptions {
 	disableBlockGasLimit?: boolean;
 
 	/**
+	 * Skip EIP-3607, which rejects a caller that has deployed code (revm's
+	 * `disable_eip3607`). Defaults to `false`.
+	 *
+	 * EIP-3607 is a transaction-validity rule, not an execution rule: it stops a
+	 * transaction being *sent* from an address that carries code, and a
+	 * simulation is not a transaction. `eth_call` routinely needs to read from a
+	 * contract address — smart-account and ERC-4337 flows, multicall
+	 * aggregators, a UI previewing what one contract sees when called by another
+	 * — and without this switch such a read is rejected with
+	 * `Transaction(RejectCallerWithCode)`, while the same read succeeds on an
+	 * engine (e.g. `@ethereumjs/evm`) whose `runCall` path does not enforce
+	 * EIP-3607 at all.
+	 *
+	 * Like the other simulation switches it may not be combined with committing:
+	 * a committed transaction from a contract address is one the chain would
+	 * reject, which breaks the cross-engine equivalence a consumer's gate exists
+	 * to protect. Use `call()`, or `transact({commit: false})`.
+	 */
+	disableEip3607?: boolean;
+
+	/**
 	 * Decode logs and state changes. `true` by default.
 	 *
 	 * Setting it to `false` takes a lighter path in the artifact that never

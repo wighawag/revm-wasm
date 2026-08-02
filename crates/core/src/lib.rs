@@ -45,7 +45,7 @@ pub use revm;
 /// Per-request behaviour switches. Deliberately explicit: an `eth_call` must
 /// never commit, a transaction always must, and the caller decides which it is.
 ///
-/// **Bits 7 and above are unallocated and reserved.** That is a forward
+/// **Bits 8 and above are unallocated and reserved.** That is a forward
 /// compatibility guarantee, not an accident: a future per-call capability (a
 /// trace, a size-variant switch, a custom-precompile opt-in) can be enabled by
 /// setting a new bit, without adding an argument and without a breaking change
@@ -108,6 +108,15 @@ pub mod flags {
     /// `disable_block_gas_limit`), which an `eth_estimateGas` binary search
     /// starting above the block's own limit would otherwise trip.
     pub const DISABLE_BLOCK_GAS_LIMIT: u32 = 1 << 6;
+    /// Skip EIP-3607, which rejects a transaction whose sender has deployed code
+    /// (revm `disable_eip3607`). EIP-3607 is a transaction-validity rule, not an
+    /// execution rule: it stops a transaction being *sent* from an address that
+    /// carries code. A simulation is not a transaction, and `eth_call` routinely
+    /// needs to read from a contract address (smart-account and ERC-4337 flows,
+    /// multicall aggregators, a UI previewing what one contract sees when called
+    /// by another). Like the three switches above it defaults to off, so the
+    /// default behaviour of every entry point is unchanged.
+    pub const DISABLE_EIP3607: u32 = 1 << 7;
 }
 
 /// The transaction-level validations a simulation may switch off, resolved from
@@ -121,10 +130,16 @@ pub struct ValidationSwitches {
     pub base_fee: bool,
     pub balance: bool,
     pub block_gas_limit: bool,
+    pub eip3607: bool,
 }
 
 impl ValidationSwitches {
-    /// Resolve from a flag word. [`flags::RELAX_VALIDATION`] sets all three.
+    /// Resolve from a flag word. [`flags::RELAX_VALIDATION`] sets the three
+    /// switches it predates (base fee, balance, block gas limit) but NOT
+    /// `eip3607`: bit 2's meaning is fixed by ADR 0004 as exactly the union of
+    /// the switches it always described, and reusing it for a new capability
+    /// would silently change every caller that sets it. `disable_eip3607` is
+    /// opted into individually, through [`flags::DISABLE_EIP3607`].
     #[inline]
     pub fn from_flags(f: u32) -> Self {
         let all = f & flags::RELAX_VALIDATION != 0;
@@ -132,6 +147,7 @@ impl ValidationSwitches {
             base_fee: all || f & flags::DISABLE_BASE_FEE != 0,
             balance: all || f & flags::DISABLE_BALANCE_CHECK != 0,
             block_gas_limit: all || f & flags::DISABLE_BLOCK_GAS_LIMIT != 0,
+            eip3607: f & flags::DISABLE_EIP3607 != 0,
         }
     }
 }
@@ -902,6 +918,7 @@ impl<H: HostDb> CallExecutor<H> {
             self.evm.ctx.cfg.disable_base_fee = switches.base_fee;
             self.evm.ctx.cfg.disable_balance_check = switches.balance;
             self.evm.ctx.cfg.disable_block_gas_limit = switches.block_gas_limit;
+            self.evm.ctx.cfg.disable_eip3607 = switches.eip3607;
         }
         // Without the feature the `CfgEnv` fields do not exist, so the request
         // asked for a capability this artifact does not have. It is ignored, and
