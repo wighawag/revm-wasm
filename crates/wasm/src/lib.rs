@@ -184,11 +184,13 @@ pub const ABI_VERSION: u32 = 1;
 /// Version of the *outcome blob* layout (see `revm_wasm_core::encode_outcome`).
 ///
 /// v1 read-only, v2 added logs and code bytes, v3 added the conditional logs
-/// bloom and the trailing effective gas price. The head has been at identical
-/// byte offsets across all three, and that is the discipline: the head is fixed,
-/// new sections are appended, and this number is readable at runtime so a
-/// decoder can refuse what it does not understand instead of misreading it.
-pub const OUTCOME_FORMAT_VERSION: u32 = 3;
+/// bloom and the trailing effective gas price, v4 appended the EIP-4844 blob gas
+/// fields (`blobGasUsed`, `blobGasPrice`) after the effective gas price. The
+/// head has been at identical byte offsets across all four versions, and that
+/// is the discipline: the head is fixed, new sections are appended, and this
+/// number is readable at runtime so a decoder can refuse what it does not
+/// understand instead of misreading it.
+pub const OUTCOME_FORMAT_VERSION: u32 = 4;
 
 /// Version of the request blob layout. Its head is fixed at offsets 0..140.
 pub const REQUEST_FORMAT_VERSION: u8 = 1;

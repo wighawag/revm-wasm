@@ -21,6 +21,7 @@ use revm::{
         BlockEnv, CfgEnv, Context, Evm, Journal, TxEnv,
     },
     context_interface::{
+        block::Block,
         transaction::{
             AccessList, AccessListItem, Authorization, RecoveredAuthorization, SignedAuthorization,
         },
@@ -842,7 +843,8 @@ fn apply_block(block: &mut BlockEnv, blob_fraction: u64, req: &CallRequest) {
 // ---------------------------------------------------------------------------
 
 /// The concrete context type (mainnet envs, host-backed database).
-pub type EvmContext<H> = Context<BlockEnv, TxEnv, CfgEnv, HostDatabase<H>, Journal<HostDatabase<H>>, ()>;
+pub type EvmContext<H> =
+    Context<BlockEnv, TxEnv, CfgEnv, HostDatabase<H>, Journal<HostDatabase<H>>, ()>;
 
 /// The concrete EVM type, mainnet instructions with a fixed precompile set.
 pub type HostEvm<H> = Evm<
@@ -947,6 +949,21 @@ impl<H: HostDb> CallExecutor<H> {
         } else {
             0
         };
+        // EIP-4844 blob gas accounting, taken straight from revm rather than
+        // reimplemented beside it: `total_blob_gas` is revm's own
+        // `Transaction::total_blob_gas` (the versioned-hash count times
+        // `GAS_PER_BLOB`), and the price is the block's `Block::blob_gasprice`,
+        // i.e. revm's `calc_blob_gasprice` over the block's excess blob gas. Both
+        // are zero for a non-blob transaction: `total_blob_gas` is zero when there
+        // are no versioned hashes, and the price is only meaningful when there is
+        // blob gas to charge, so a receipt built from these fields reads zero
+        // for a type-0/1/2 transaction exactly as the protocol does.
+        let blob_gas_used = tx.total_blob_gas();
+        let blob_gas_price = if blob_gas_used > 0 {
+            self.evm.ctx.block.blob_gasprice().unwrap_or(0)
+        } else {
+            0
+        };
         self.evm.ctx.journaled_state.database.begin_tx();
         match self.evm.transact(tx) {
             Ok(res) => {
@@ -955,6 +972,8 @@ impl<H: HostDb> CallExecutor<H> {
                     &res.state,
                     &self.evm.ctx.journaled_state.database.original_code_hash,
                     effective_gas_price,
+                    blob_gas_used,
+                    blob_gas_price,
                 );
                 if COMMIT_ENABLED && req.wants_commit() {
                     self.evm.ctx.journaled_state.database.commit(res.state);
@@ -1059,6 +1078,11 @@ pub fn encode_validation_error(msg: &str) -> Vec<u8> {
     if EMIT_EFFECTIVE_GAS_PRICE {
         out.extend_from_slice(&0u128.to_be_bytes()); // effective gas price
     }
+    // A validation error never reached execution, so there is no blob gas to
+    // report. Written unconditionally so the head offsets and the trailing
+    // section layout are the same for every status, matching the full path.
+    out.extend_from_slice(&0u64.to_le_bytes()); // blob gas used
+    out.extend_from_slice(&0u128.to_be_bytes()); // blob gas price
     out
 }
 
@@ -1149,8 +1173,13 @@ pub fn encode_outcome_light(result: &ExecutionResult) -> Vec<u8> {
 /// Compact binary encoding of the call outcome. One `Uint8Array` crosses the
 /// boundary per call, rather than a JS object graph.
 ///
-/// Format v2. v1 was identical up to and including the return data, then went
-/// straight to the account list, and carried no logs and no code bytes.
+/// Format v4. v1 was identical up to and including the return data, then went
+/// straight to the account list, and carried no logs and no code bytes. v2
+/// added logs and code bytes. v3 added the conditional logs bloom and the
+/// trailing effective gas price. v4 appends the EIP-4844 blob gas fields after
+/// the effective gas price. The head has been at identical byte offsets across
+/// all four versions, which is the discipline that lets a downstream decoder
+/// survive a version bump.
 ///
 /// ```text
 /// u8   status: 0 = success, 1 = revert, 2 = halt, 3 = validation error
@@ -1178,7 +1207,24 @@ pub fn encode_outcome_light(result: &ExecutionResult) -> Vec<u8> {
 ///               [32] present value (big-endian)
 /// [16] effective gas price (big-endian), i.e. what the sender actually paid
 ///      per unit of gas: revm's own `Transaction::effective_gas_price`
+/// u64  blob gas used (little-endian) == revm's `Transaction::total_blob_gas`
+///      (versioned-hash count times `GAS_PER_BLOB`); zero for a non-blob
+///      transaction. Written UNCONDITIONALLY — see the note below.
+/// [16] blob gas price (big-endian) == revm's `Block::blob_gasprice`, i.e.
+///      `calc_blob_gasprice` over the block's excess blob gas; zero for a
+///      non-blob transaction. Written UNCONDITIONALLY — see the note below.
 /// ```
+///
+/// The two trailing blob-gas fields are written unconditionally (zero for a
+/// non-blob transaction) rather than made conditional on the versioned-hash
+/// count, and that choice is deliberate. The 256-byte logs bloom is conditional
+/// on a non-zero log count, and that conditionality is the thing the format's
+/// own documentation names as what bites a hand-rolled decoder: it works on
+/// exactly the calls that are easiest to test with and then desynchronises on
+/// the first call that emits no logs. Two small fixed-width fields do not pay
+/// for that hazard, so they are always present and a decoder never has to
+/// branch on a count it has already parsed to know where the next section
+/// starts.
 ///
 /// Logs are *not* sorted: emission order is the semantics that receipts and
 /// `eth_getLogs` need. revm hands them over already filtered, because a reverted
@@ -1196,6 +1242,8 @@ pub fn encode_outcome(
     state: &revm::state::EvmState,
     original_code_hash: &AddressMap<B256>,
     effective_gas_price: u128,
+    blob_gas_used: u64,
+    blob_gas_price: u128,
 ) -> Vec<u8> {
     let mut out = Vec::with_capacity(256);
     encode_head(&mut out, result);
@@ -1295,6 +1343,22 @@ pub fn encode_outcome(
     if EMIT_EFFECTIVE_GAS_PRICE {
         out.extend_from_slice(&effective_gas_price.to_be_bytes());
     }
+
+    // EIP-4844 blob gas, appended after the effective gas price. These two
+    // fields are written UNCONDITIONALLY — zero for a non-blob transaction —
+    // rather than made conditional on the versioned-hash count, and the choice
+    // is deliberate. The 256-byte logs bloom is conditional on a non-zero log
+    // count, and that conditionality is the thing the format's own documentation
+    // names as what bites a hand-rolled decoder: it works on exactly the calls
+    // that are easiest to test with (calls that emit logs) and desynchronises on
+    // the first call that emits none. Two small fixed-width fields do not pay
+    // for that hazard, so they are always present. `blob_gas_used` is revm's own
+    // `Transaction::total_blob_gas` and `blob_gas_price` is revm's own
+    // `Block::blob_gasprice`, not a second implementation of the EIP-4844 fee
+    // rule; a consumer building a type-3 receipt reads them straight off the
+    // outcome without reimplementing `fake_exponential` in JavaScript.
+    out.extend_from_slice(&blob_gas_used.to_le_bytes());
+    out.extend_from_slice(&blob_gas_price.to_be_bytes());
     out
 }
 

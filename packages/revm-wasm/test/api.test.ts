@@ -74,7 +74,7 @@ describe('runtime version reporting', () => {
 		expect(evm.revmVersion).toMatch(/^\d+\.\d+\.\d+$/);
 		// A 40-character git sha, so a bug report can say exactly what ran.
 		expect(evm.revmRevision).toMatch(/^[0-9a-f]{40}$/);
-		expect(evm.outcomeFormatVersion).toBe(3);
+		expect(evm.outcomeFormatVersion).toBe(4);
 		expect(evm.abiVersion).toBe(1);
 		expect(evm.info.build).toContain('precompiles=all');
 	});
@@ -882,5 +882,173 @@ describe('signer recovery', () => {
 		}
 		expect(recoveredCount).toBe(64);
 		expect(rejectedCount).toBe(1);
+	});
+});
+
+describe('EIP-4844 blob gas reporting', () => {
+	// The per-blob gas constant from EIP-4844 (revm's `GAS_PER_BLOB` = 1 << 17).
+	const GAS_PER_BLOB = 131072n;
+
+	// `blobVersionedHashes` the typed fixture uses (two versioned hashes).
+	const BLOB_HASH_1 = unhex(
+		'0x0111111111111111111111111111111111111111111111111111111111111111',
+	);
+	const BLOB_HASH_2 = unhex(
+		'0x0122222222222222222222222222222222222222222222222222222222222222',
+	);
+
+	// BLOBBASEFEE; PUSH1 0; MSTORE; PUSH1 0x20; PUSH1 0; RETURN — returns the
+	// blob base fee, i.e. what `blobGasPrice` should match.
+	const RETURN_BLOB_BASEFEE = unhex('4a60005260206000f3');
+
+	it('reports blobGasUsed as the versioned-hash count times GAS_PER_BLOB for a type-3 transaction', () => {
+		const {evm} = evmWith([
+			{address: CALLER},
+			{address: TARGET, code: RETURN_42},
+		]);
+		const out = evm.call({
+			from: CALLER,
+			to: TARGET,
+			gasLimit: 200_000n,
+			blobVersionedHashes: [BLOB_HASH_1, BLOB_HASH_2],
+			maxFeePerBlobGas: 10n,
+		});
+		expect(out.success).toBe(true);
+		// 2 versioned hashes × GAS_PER_BLOB, straight from revm's
+		// `Transaction::total_blob_gas`.
+		expect(out.blobGasUsed).toBe(2n * GAS_PER_BLOB);
+		// The block carries no excess blob gas, so the blob gas price is the 1-wei
+		// minimum (MIN_BLOB_GASPRICE), not the transaction's max fee: the max fee
+		// is what the sender is WILLING to pay, while blobGasPrice is what the
+		// block actually charges, derived from its excess blob gas.
+		expect(out.blobGasPrice).toBe(1n);
+	});
+
+	it('reports blobGasPrice matching the block excess blob gas, not a JS reimplementation', () => {
+		const {evm} = evmWith([
+			{address: CALLER},
+			{address: TARGET, code: RETURN_BLOB_BASEFEE},
+		]);
+		const out = evm.call({
+			from: CALLER,
+			to: TARGET,
+			gasLimit: 200_000n,
+			blobVersionedHashes: [BLOB_HASH_1],
+			maxFeePerBlobGas: 100_000_000n,
+			block: {excessBlobGas: 10_000_000n},
+		});
+		expect(out.success).toBe(true);
+		expect(out.blobGasUsed).toBe(GAS_PER_BLOB);
+		// revm's `calc_blob_gasprice(10_000_000, BLOB_BASE_FEE_UPDATE_FRACTION_CANCUN)`,
+		// which is well above the 1-wei minimum. The value comes from the engine,
+		// and the contract reading BLOBBASEFEE agrees, which is the cross-check that
+		// this is revm's own number and not a second implementation beside it.
+		expect(out.blobGasPrice).toBe(asWord(out.returnData));
+		// The price is non-trivially above the 1-wei minimum, confirming the
+		// excess-blob-gas input actually drove it.
+		expect(out.blobGasPrice).toBeGreaterThan(1n);
+	});
+
+	it('reports zero blobGasUsed and blobGasPrice for a non-blob transaction', () => {
+		const {evm} = evmWith([
+			{address: CALLER},
+			{address: TARGET, code: RETURN_42},
+		]);
+		const out = evm.call({
+			from: CALLER,
+			to: TARGET,
+			gasLimit: 100_000n,
+		});
+		expect(out.success).toBe(true);
+		expect(out.blobGasUsed).toBe(0n);
+		expect(out.blobGasPrice).toBe(0n);
+		// And the outcome still decodes correctly — no trailing garbage.
+		expect(out.effectiveGasPrice).toBe(0n);
+		expect(out.stateChanges!.length).toBeGreaterThan(0);
+	});
+
+	it('reports zero blobGasUsed and blobGasPrice for a validation error', () => {
+		const {evm} = evmWith([{address: CALLER, balance: 1n}]);
+		const out = evm.transact({
+			from: CALLER,
+			to: TARGET,
+			gasLimit: 100_000n,
+			gasPrice: 10n,
+			value: 1000n,
+		});
+		expect(out.status).toBe('validation-error');
+		expect(out.blobGasUsed).toBe(0n);
+		expect(out.blobGasPrice).toBe(0n);
+	});
+
+	it('writes the two blob-gas fields unconditionally, so the head offsets are unchanged from v3', () => {
+		// The head (status | gasUsed | totalGasSpent | refunded | returnData) has
+		// been at identical byte offsets across every version of this format.
+		// This test reads the head of a version-4 blob with the version-3 head
+		// expectations: the fixed fields at offsets 0, 1, 9, 17, 25, and the
+		// return-data length at 25, must land exactly where a v3 decoder would
+		// read them. If the head moved, this test fails.
+		const {evm} = evmWith([
+			{address: CALLER},
+			{address: TARGET, code: RETURN_42},
+		]);
+		const blob = evm.executeRaw(
+			encodeRequest(
+				{from: CALLER, to: TARGET, gasLimit: 100_000n},
+				{spec: Spec.CANCUN, chainId: 1n, block: {}},
+				0,
+			),
+		);
+		const dv = new DataView(blob.buffer, blob.byteOffset, blob.byteLength);
+		// Status at offset 0.
+		expect(blob[0]).toBe(0); // success
+		// gasUsed at offset 1 (LE u64).
+		const headGasUsed = dv.getBigUint64(1, true);
+		// totalGasSpent at offset 9 (LE u64).
+		const headTotalGasSpent = dv.getBigUint64(9, true);
+		// refunded at offset 17 (LE u64).
+		const headRefunded = dv.getBigUint64(17, true);
+		// returnData length at offset 25 (LE u32).
+		const headRetLen = dv.getUint32(25, true);
+		const headRetData = blob.slice(29, 29 + headRetLen);
+
+		// Cross-check against the decoded outcome, which uses the same offsets.
+		const out = decodeOutcome(blob);
+		expect(out.success).toBe(true);
+		expect(headGasUsed).toBe(out.gasUsed);
+		expect(headTotalGasSpent).toBe(out.totalGasSpent);
+		expect(headRefunded).toBe(out.gasRefunded);
+		expect(BigInt(headRetLen)).toBe(BigInt(out.returnData.length));
+		expect(tohex(headRetData)).toBe(tohex(out.returnData));
+
+		// The trailing blob-gas fields follow the effective gas price. For a
+		// non-blob transaction they are exactly 24 zero bytes (8 + 16), and they
+		// are the LAST thing in the blob, so a decoder that reads the head with
+		// v3 expectations and then skips the variable sections lands on them.
+		expect(out.blobGasUsed).toBe(0n);
+		expect(out.blobGasPrice).toBe(0n);
+		// 24 trailing zero bytes: u64(0) LE + u128(0) BE.
+		const tail = blob.slice(blob.length - 24);
+		expect(tail.every((b) => b === 0)).toBe(true);
+	});
+
+	it('the trailing blob-gas fields are present even when there are no logs or state changes', () => {
+		// The light path stops at the head, but a full-path call that emits no
+		// logs and whose state is empty still gets the trailing blob-gas section.
+		// This is the unconditional guarantee: the fields are always there, unlike
+		// the conditional bloom.
+		const {evm} = evmWith([{address: CALLER}]);
+		const blob = evm.executeRaw(
+			encodeRequest(
+				{from: CALLER, gasLimit: 100_000n},
+				{spec: Spec.CANCUN, chainId: 1n, block: {}},
+				0,
+			),
+		);
+		const out = decodeOutcome(blob);
+		expect(out.blobGasUsed).toBe(0n);
+		expect(out.blobGasPrice).toBe(0n);
+		// The blob is at least head + 24 trailing bytes.
+		expect(blob.length).toBeGreaterThanOrEqual(29 + 24);
 	});
 });

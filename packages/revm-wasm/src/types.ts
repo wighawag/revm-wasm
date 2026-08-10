@@ -270,6 +270,25 @@ export interface Outcome {
 	 * `min(maxFee, baseFee + tip)`. Use this for a receipt's `effectiveGasPrice`.
 	 */
 	effectiveGasPrice: bigint;
+	/**
+	 * EIP-4844 blob gas used: revm's own `Transaction::total_blob_gas`, i.e. the
+	 * versioned-hash count times the per-blob gas constant (`GAS_PER_BLOB`).
+	 *
+	 * Zero for a non-blob transaction, so a consumer can test `blobGasUsed > 0n`
+	 * to know whether the call carried blobs. Use this for a type-3 receipt's
+	 * `blobGasUsed`, alongside `blobGasPrice`.
+	 */
+	blobGasUsed: bigint;
+	/**
+	 * EIP-4844 blob gas price: revm's own `Block::blob_gasprice`, i.e.
+	 * `calc_blob_gasprice` over the block's excess blob gas — the same
+	 * `fake_exponential` rule the engine charges blob gas with, not a second
+	 * implementation on the JavaScript side.
+	 *
+	 * Zero for a non-blob transaction. Use this for a type-3 receipt's
+	 * `blobGasPrice`, alongside `blobGasUsed`.
+	 */
+	blobGasPrice: bigint;
 	/** Return data, or the revert data, or the deployed code for a creation. */
 	returnData: Uint8Array;
 	/**

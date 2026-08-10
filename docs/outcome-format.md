@@ -8,20 +8,20 @@ Everything below is produced and consumed in exactly two files: `crates/core/src
 
 This is the part that matters more than any individual field.
 
-1. **The head stays at fixed offsets across versions.** In the outcome blob that is `status | gasUsed | totalGasSpent | refunded | returnData`, which has been at identical offsets in v1, v2 and v3. In the request blob it is offsets 0..140.
+1. **The head stays at fixed offsets across versions.** In the outcome blob that is `status | gasUsed | totalGasSpent | refunded | returnData`, which has been at identical offsets in v1, v2, v3 and v4. In the request blob it is offsets 0..140.
 2. **New sections are appended after the head**, never inserted into it.
 3. **The version is readable at runtime**, so a decoder can refuse a format it does not understand rather than misread it:
 
 ```ts
-evm.outcomeFormatVersion; // 3
+evm.outcomeFormatVersion; // 4
 evm.abiVersion; // 1
 ```
 
-That discipline is the only reason a downstream decoder survived v1 (read-only) to v2 (logs and code bytes) to v3 (conditional bloom and trailing effective gas price). A future trace section is the same move again.
+That discipline is the only reason a downstream decoder survived v1 (read-only) to v2 (logs and code bytes) to v3 (conditional bloom and trailing effective gas price) to v4 (trailing EIP-4844 blob gas fields). A future trace section is the same move again.
 
 **Flag-word bits 4 and above are unallocated and reserved**, so a future per-call capability needs no new argument. See ADR 0004.
 
-## Outcome blob, version 3
+## Outcome blob, version 4
 
 ```text
 u8   status: 0 success, 1 revert, 2 halt, 3 validation error
@@ -46,15 +46,19 @@ u32  account count, then per account (sorted by address):
        if bit3: u32 code length, then bytes
        u32  changed slot count, then [32] key + [32] value each
 [16] effective gas price (BE)
+u64  blob gas used (LE)   == revm's `Transaction::total_blob_gas`
+[16] blob gas price (BE)  == revm's `Block::blob_gasprice`
 ```
 
-### The two things a hand-rolled decoder gets wrong
+### The three things a hand-rolled decoder gets wrong
 
 Both of these have broken a real consumer.
 
 **1. The 256-byte bloom is conditional.** It is present only when the log count is non-zero, because a zero-log receipt's bloom is 256 zero bytes and the host already knows that. Over a 63,551-call corpus only 1.0% of calls emit logs, so paying 256 bytes on every `eth_call` would be waste. A decoder that always skips 256 bytes works on exactly the calls that are easiest to test with, then desynchronises the instant a call emits nothing.
 
 **2. Code bytes mean "the code HASH changed", not "revm loaded some code".** `JournaledAccount::load_code_preserve_error` populates `AccountInfo::code` for **any** contract that merely executes. Emitting on that signal would ship the full bytecode of every contract touched, on every call: a 20 KB contract would cost 20 KB across the boundary per `eth_call`. The engine records each address's pre-transaction code hash on first load and emits bytes only when the final hash differs. Measured over the spike's corpus: 7,319 flagged accounts, zero that were not created, zero that emitted empty bytes.
+
+**3. The two trailing blob-gas fields are UNCONDITIONAL.** They are always present, zero for a non-blob transaction, rather than made conditional on the versioned-hash count. The bloom's conditionality (point 1) is exactly the shape that bites a hand-rolled decoder, and two small fixed-width fields (24 bytes total) do not pay for that hazard, so a decoder never has to branch on a count it has already parsed to know where the next section starts. `blobGasUsed` is revm's own `Transaction::total_blob_gas` (the versioned-hash count times `GAS_PER_BLOB`) and `blobGasPrice` is revm's own `Block::blob_gasprice` (`calc_blob_gasprice` over the block's excess blob gas), not a second implementation of the EIP-4844 fee rule. A consumer building a type-3 receipt reads them straight off the outcome; the previous gap forced `embedded-eth-node` to refuse blob transactions rather than return an incomplete receipt.
 
 ### Other things worth knowing
 
@@ -65,6 +69,7 @@ Both of these have broken a real consumer.
 - **The effective gas price is revm's own** `Transaction::effective_gas_price`, not a second implementation of `min(maxFee, baseFee + tip)`. It is trailing, so anything that decodes sequentially and stops after the account list is unaffected. It costs about 1.7 KB gzipped in the artifact for a 16-byte field, which is out of proportion and unexplained, and it is still the right trade: the alternative is reimplementing fee arithmetic host-side.
 - **A validation error (status 3)** carries revm's own `InvalidTransaction` variant as UTF-8 text in the return-data slot, for example `NonceTooHigh { tx: 99, state: 5 }`. The decoder surfaces it as `outcome.error`.
 - **The light path stops after the head.** `returnState: false` returns status, gas and return data only, with no logs, no bloom, no state and no trailing price. It is worth about 0.9 microseconds per call, all of it from skipping the state encoding.
+- **The trailing blob-gas fields close a reporting gap, not an execution gap.** The artifact already executed blob transactions correctly (`BLOBHASH`, `BLOBBASEFEE`, versioned-hash validation, the fee charge); what was missing was `blobGasUsed` and `blobGasPrice` on the *outcome*, so a consumer building an EIP-4844 type-3 receipt could not fill those two fields without reimplementing `fake_exponential` in JavaScript. Both are revm's own — `Transaction::total_blob_gas` and `Block::blob_gasprice` — and both are written unconditionally (zero for a non-blob transaction), for the reason in point 3 above. `embedded-eth-node` previously worked around the gap by refusing blob transactions; it can now stop.
 
 ## Request blob, version 1
 

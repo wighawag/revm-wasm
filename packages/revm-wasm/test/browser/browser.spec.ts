@@ -46,7 +46,7 @@ test('the differential corpus passes in a real browser', async ({
 	// Two instances in one page, each answering from its own state.
 	expect(result.results.isolation).toEqual({a: 0x11, b: 0x22});
 	// The artifact identifies itself the same way it does in Node.
-	expect(result.results.outcomeFormatVersion).toBe(3);
+	expect(result.results.outcomeFormatVersion).toBe(4);
 	expect(result.results.abiVersion).toBe(1);
 	expect(String(result.results.build)).toContain('precompiles=all');
 	expect(String(result.results.revmRev)).toMatch(/^[0-9a-f]{40}$/);

@@ -12,7 +12,7 @@ const ZERO_BLOOM = new Uint8Array(256);
 const decoder = new TextDecoder();
 
 /**
- * The outcome blob layout, version 3.
+ * The outcome blob layout, version 4.
  *
  * ```text
  * u8   status: 0 success, 1 revert, 2 halt, 3 validation error
@@ -31,9 +31,11 @@ const decoder = new TextDecoder();
  *        if bit3: u32 code length + bytes
  *        u32  changed slot count, then [32] key + [32] value each
  * [16] effective gas price (BE)
+ * u64  blob gas used (LE)   == revm's Transaction::total_blob_gas
+ * [16] blob gas price (BE)  == revm's Block::blob_gasprice
  * ```
  *
- * Two details that a hand-rolled decoder gets wrong, both of which have bitten
+ * Three details that a hand-rolled decoder gets wrong, two of which have bitten
  * a real consumer:
  *
  * 1. **The 256-byte bloom is CONDITIONAL.** It is present only when the log
@@ -43,12 +45,18 @@ const decoder = new TextDecoder();
  *    the moment a call emits no logs.
  * 2. **Code bytes are conditional on flag bit 3**, which means "the code hash
  *    changed", not "revm loaded some code".
+ * 3. **The two trailing blob-gas fields are UNCONDITIONAL.** They are always
+ *    present, zero for a non-blob transaction. This is a deliberate choice: the
+ *    bloom's conditionality (above) is exactly the shape that bites a
+ *    hand-rolled decoder, and two small fixed-width fields do not pay for that
+ *    hazard, so a decoder never has to branch on a count it already parsed to
+ *    know where the next section starts.
  *
  * The head is at fixed offsets across versions and new sections are appended
  * after it. That discipline is the only reason a downstream decoder survived v1
- * to v2 to v3, and it is what a future trace section would follow.
+ * to v2 to v3 to v4, and it is what a future trace section would follow.
  */
-export const OUTCOME_FORMAT_VERSION = 3;
+export const OUTCOME_FORMAT_VERSION = 4;
 
 /**
  * Decode one outcome blob.
@@ -80,6 +88,8 @@ export function decodeOutcome(buf: Uint8Array): Outcome {
 		totalGasSpent,
 		gasRefunded,
 		effectiveGasPrice: 0n,
+		blobGasUsed: 0n,
+		blobGasPrice: 0n,
 		returnData,
 	};
 	// A pre-execution rejection puts revm's own `InvalidTransaction` variant in
@@ -163,9 +173,31 @@ export function decodeOutcome(buf: Uint8Array): Outcome {
 	let effectiveGasPrice = 0n;
 	if (o + 16 <= buf.length) {
 		effectiveGasPrice = (dv.getBigUint64(o) << 64n) | dv.getBigUint64(o + 8);
+		o += 16;
 	}
 
-	return {...base, effectiveGasPrice, logs, logsBloom, stateChanges};
+	// The two trailing blob-gas fields are UNCONDITIONAL (zero for a non-blob
+	// transaction), so a decoder never branches on a count it already parsed.
+	let blobGasUsed = 0n;
+	let blobGasPrice = 0n;
+	if (o + 8 <= buf.length) {
+		blobGasUsed = dv.getBigUint64(o, true);
+		o += 8;
+	}
+	if (o + 16 <= buf.length) {
+		blobGasPrice = (dv.getBigUint64(o) << 64n) | dv.getBigUint64(o + 8);
+		o += 16;
+	}
+
+	return {
+		...base,
+		effectiveGasPrice,
+		blobGasUsed,
+		blobGasPrice,
+		logs,
+		logsBloom,
+		stateChanges,
+	};
 }
 
 function readBE(dv: DataView, offset: number): bigint {
