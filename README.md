@@ -72,11 +72,14 @@ A read is not a transaction, and two of the checks a transaction must pass are u
 | `disableBaseFee` | `gasPrice >= block base fee` | `GasPriceLessThanBasefee` |
 | `disableBalanceCheck` | `balance >= gasLimit * gasPrice + value` | `LackOfFundForMaxFee` |
 | `disableBlockGasLimit` | `gasLimit <= block gas limit` | `CallerGasLimitMoreThanBlock` |
+| `disableEip3607` | the sender has no deployed code (EIP-3607) | `RejectCallerWithCode` |
+| `disableTxGasLimitCap` | `gasLimit <= 16,777,216` from Osaka on (EIP-7825) | `TxGasLimitGreaterThanCap` |
 
-All three default to `false`, everywhere, so nothing changes for a caller that does not ask. Three things worth knowing before you turn them on:
+All of them default to `false`, everywhere, so nothing changes for a caller that does not ask. Four things worth knowing before you turn them on:
 
 - **They do not move gas.** The charge is fee-independent, so a read that was passing `baseFeePerGas: 0n` as a workaround gets identical gas after switching to the real base fee plus `disableBaseFee`. What changes is that `block.basefee` inside a view function now reports the truth.
 - **`disableBalanceCheck` invents funds.** revm raises the caller's balance to cover the value being sent, so the sender and recipient balances in `stateChanges` can be numbers the chain never had. Fine for a discarded read.
+- **`disableTxGasLimitCap` lifts only the cap.** EIP-7825 bounds what a transaction may ask for, and geth skips it for `eth_call` (not for `eth_estimateGas`). With the switch on, a read above the cap runs with its whole `gasLimit` and costs what it would with no cap. EIP-7623's calldata floor and the intrinsic-gas check still apply. Before Osaka there is no cap, and from Amsterdam (EIP-8037) the cap meters gas rather than rejecting the transaction, so in both cases the switch changes nothing.
 - **They cannot be committed.** `transact({commit: true, disableBalanceCheck: true})` throws rather than writing invented funds into your store. Use `call()`, or `transact({commit: false})` to simulate a transaction from an account that cannot pay for it. ([ADR 0006](docs/adr/0006-simulation-switches.md))
 
 ```ts

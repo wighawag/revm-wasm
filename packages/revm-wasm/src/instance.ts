@@ -217,7 +217,8 @@ export class Revm {
 				// writes funds that never existed into the consumer's own state, and
 				// it would do it silently.
 				throw new Error(
-					'revm-wasm: disableBaseFee / disableBalanceCheck / disableBlockGasLimit / disableEip3607 are ' +
+					'revm-wasm: disableBaseFee / disableBalanceCheck / disableBlockGasLimit / disableEip3607 / ' +
+						'disableTxGasLimitCap are ' +
 						'simulation-only and cannot be combined with committing. Use call(), or ' +
 						'transact({commit: false}) to simulate without writing.',
 				);
@@ -229,7 +230,8 @@ export class Revm {
 				throw new Error(
 					`revm-wasm: this artifact (build "${this.info.build}") was built without ` +
 						'`relaxed-validation`, so disableBaseFee / disableBalanceCheck / ' +
-						'disableBlockGasLimit / disableEip3607 cannot be honoured. Use the shipped revm.wasm.',
+						'disableBlockGasLimit / disableEip3607 / disableTxGasLimitCap cannot be honoured. ' +
+						'Use the shipped revm.wasm.',
 				);
 			}
 		}
@@ -256,7 +258,8 @@ export class Revm {
 	 *   block: {...realBlock},      // the REAL base fee, not a zeroed one,
 	 *   disableBaseFee: true,       // which these two make servable from an
 	 *   disableBalanceCheck: true,  // address that holds no ether,
-	 *   disableEip3607: true,       // and this one from a contract address
+	 *   disableEip3607: true,       // and this one from a contract address,
+	 *   disableTxGasLimitCap: true, // and this one above EIP-7825's cap
 	 * });
 	 * ```
 	 */

@@ -207,7 +207,7 @@ pub const REQUEST_FORMAT_VERSION: u8 = 1;
 /// 0    u8   version (REQUEST_FORMAT_VERSION)
 /// 1    u8   spec id (revm SpecId discriminant)
 /// 2    u16  reserved, must be 0
-/// 4    u32  flags (see revm_wasm_core::flags; bits 4+ unallocated)
+/// 4    u32  flags (see revm_wasm_core::flags; bits 9+ unallocated)
 /// 8    u64  gas limit
 /// 16   u64  chain id
 /// 24   u64  block number

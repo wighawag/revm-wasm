@@ -4,7 +4,7 @@ import type {BlockEnv, ExecuteOptions} from './types.js';
 /**
  * Per-call flag bits. These mirror `revm_wasm_core::flags` exactly.
  *
- * **Bits 8 and above are unallocated and reserved**, on purpose. A future
+ * **Bits 9 and above are unallocated and reserved**, on purpose. A future
  * per-call capability (a trace, a build-variant switch, a custom-precompile
  * opt-in) can be enabled by setting a new bit, with no new argument and no
  * breaking change at any entry point. An artifact that does not know a bit
@@ -25,6 +25,8 @@ export const Flags = {
 	DISABLE_BLOCK_GAS_LIMIT: 1 << 6,
 	/** `disableEip3607`: skip EIP-3607 (reject caller with code). */
 	DISABLE_EIP3607: 1 << 7,
+	/** `disableTxGasLimitCap`: lift EIP-7825's per-transaction gas cap. */
+	DISABLE_TX_GAS_LIMIT_CAP: 1 << 8,
 } as const;
 
 /**
@@ -37,7 +39,8 @@ export const SIMULATION_FLAGS =
 	Flags.DISABLE_BASE_FEE |
 	Flags.DISABLE_BALANCE_CHECK |
 	Flags.DISABLE_BLOCK_GAS_LIMIT |
-	Flags.DISABLE_EIP3607;
+	Flags.DISABLE_EIP3607 |
+	Flags.DISABLE_TX_GAS_LIMIT_CAP;
 
 /**
  * Resolve the simulation switches an options object asks for. Every one of them
@@ -50,6 +53,7 @@ export function simulationFlags(o: ExecuteOptions): number {
 	if (o.disableBalanceCheck) flags |= Flags.DISABLE_BALANCE_CHECK;
 	if (o.disableBlockGasLimit) flags |= Flags.DISABLE_BLOCK_GAS_LIMIT;
 	if (o.disableEip3607) flags |= Flags.DISABLE_EIP3607;
+	if (o.disableTxGasLimitCap) flags |= Flags.DISABLE_TX_GAS_LIMIT_CAP;
 	return flags;
 }
 
