@@ -46,7 +46,7 @@ pub use revm;
 /// Per-request behaviour switches. Deliberately explicit: an `eth_call` must
 /// never commit, a transaction always must, and the caller decides which it is.
 ///
-/// **Bits 8 and above are unallocated and reserved.** That is a forward
+/// **Bits 9 and above are unallocated and reserved.** That is a forward
 /// compatibility guarantee, not an accident: a future per-call capability (a
 /// trace, a size-variant switch, a custom-precompile opt-in) can be enabled by
 /// setting a new bit, without adding an argument and without a breaking change
@@ -118,6 +118,25 @@ pub mod flags {
     /// by another). Like the three switches above it defaults to off, so the
     /// default behaviour of every entry point is unchanged.
     pub const DISABLE_EIP3607: u32 = 1 << 7;
+    /// Lift EIP-7825's per-transaction gas limit cap (16,777,216 from Osaka on)
+    /// by setting revm's `CfgEnv::tx_gas_limit_cap` to `Some(u64::MAX)`.
+    ///
+    /// EIP-7825 is a transaction-validity rule: it bounds what a transaction may
+    /// *ask for*. revm applies it to every execution, so an `eth_call` above the
+    /// cap is rejected with `TxGasLimitGreaterThanCap`, whereas geth skips the
+    /// cap for `eth_call` (`SkipGasLimitCapCheck`) and `@ethereumjs/evm`'s
+    /// `runCall` does not enforce it at all. The same field also bounds the
+    /// regular gas budget handed to execution, so lifting it gives the call the
+    /// whole `gasLimit`.
+    ///
+    /// It lifts ONLY the cap. EIP-7623's calldata floor, the intrinsic-gas check
+    /// and every other validation still run. Below Osaka revm's default cap is
+    /// already `u64::MAX`, so the bit changes nothing there. From Amsterdam on
+    /// (EIP-8037) revm no longer rejects above the cap but uses it to split
+    /// regular gas from the state-gas reservoir, so the bit is ignored there
+    /// rather than allowed to change metering. Off, the field is
+    /// left at `None` (revm's spec default), exactly as before the bit existed.
+    pub const DISABLE_TX_GAS_LIMIT_CAP: u32 = 1 << 8;
 }
 
 /// The transaction-level validations a simulation may switch off, resolved from
@@ -132,6 +151,7 @@ pub struct ValidationSwitches {
     pub balance: bool,
     pub block_gas_limit: bool,
     pub eip3607: bool,
+    pub tx_gas_limit_cap: bool,
 }
 
 impl ValidationSwitches {
@@ -140,7 +160,8 @@ impl ValidationSwitches {
     /// `eip3607`: bit 2's meaning is fixed by ADR 0004 as exactly the union of
     /// the switches it always described, and reusing it for a new capability
     /// would silently change every caller that sets it. `disable_eip3607` is
-    /// opted into individually, through [`flags::DISABLE_EIP3607`].
+    /// opted into individually, through [`flags::DISABLE_EIP3607`]. The same
+    /// holds for `tx_gas_limit_cap` and [`flags::DISABLE_TX_GAS_LIMIT_CAP`].
     #[inline]
     pub fn from_flags(f: u32) -> Self {
         let all = f & flags::RELAX_VALIDATION != 0;
@@ -149,6 +170,7 @@ impl ValidationSwitches {
             balance: all || f & flags::DISABLE_BALANCE_CHECK != 0,
             block_gas_limit: all || f & flags::DISABLE_BLOCK_GAS_LIMIT != 0,
             eip3607: f & flags::DISABLE_EIP3607 != 0,
+            tx_gas_limit_cap: f & flags::DISABLE_TX_GAS_LIMIT_CAP != 0,
         }
     }
 }
@@ -928,6 +950,24 @@ impl<H: HostDb> CallExecutor<H> {
             self.evm.ctx.cfg.disable_balance_check = switches.balance;
             self.evm.ctx.cfg.disable_block_gas_limit = switches.block_gas_limit;
             self.evm.ctx.cfg.disable_eip3607 = switches.eip3607;
+            // Unlike the four above this is not an `optional_*` revm field: it
+            // always exists, and `None` means "the spec's own cap". It is still
+            // gated on the feature so that an artifact built without
+            // `relaxed-validation` honours none of the simulation switches,
+            // which is what the TypeScript layer assumes. Written on every call:
+            // `None` when off, so a lifted cap never leaks into the next request.
+            //
+            // Not applied once EIP-8037 is on (Amsterdam and later). There revm
+            // no longer rejects a gas limit above the cap; the cap instead splits
+            // the budget into regular gas and the state-gas reservoir, so lifting
+            // it would change how execution is metered rather than skip a check.
+            // With nothing to skip, the switch is a no-op there.
+            let lift = switches.tx_gas_limit_cap && !self.evm.ctx.cfg.enable_amsterdam_eip8037;
+            self.evm.ctx.cfg.tx_gas_limit_cap = if lift {
+                Some(u64::MAX)
+            } else {
+                None
+            };
         }
         // Without the feature the `CfgEnv` fields do not exist, so the request
         // asked for a capability this artifact does not have. It is ignored, and

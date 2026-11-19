@@ -199,6 +199,31 @@ export interface ExecuteOptions {
 	disableEip3607?: boolean;
 
 	/**
+	 * Lift EIP-7825's per-transaction gas limit cap (revm's
+	 * `CfgEnv::tx_gas_limit_cap`, set to `u64::MAX`). Defaults to `false`.
+	 *
+	 * From Osaka on, a transaction may not ask for more than 16,777,216 gas, and
+	 * revm applies that to every execution, so without this switch a read above
+	 * the cap is rejected with `TxGasLimitGreaterThanCap` even when
+	 * `disableBlockGasLimit` is set. The cap bounds what a transaction may ask
+	 * for, and a simulation is not a transaction: geth skips it for `eth_call`
+	 * (while still applying it to `eth_estimateGas`), and `@ethereumjs/evm`'s
+	 * `runCall` does not enforce it at all. With the switch on, the call runs
+	 * with its whole `gasLimit`, and gas is what it would be with no cap.
+	 *
+	 * It lifts only the cap. EIP-7623's calldata floor
+	 * (`GasFloorMoreThanGasLimit`), the intrinsic-gas check and every other
+	 * validation still apply. Before Osaka there is no cap, and from Amsterdam
+	 * (EIP-8037) on the cap no longer rejects a transaction but meters it, so
+	 * in both cases the switch changes nothing.
+	 *
+	 * Like the other simulation switches it may not be combined with committing:
+	 * a committed transaction above the cap is one the chain would reject. Use
+	 * `call()`, `transact({commit: false})` or `create({commit: false})`.
+	 */
+	disableTxGasLimitCap?: boolean;
+
+	/**
 	 * Decode logs and state changes. `true` by default.
 	 *
 	 * Setting it to `false` takes a lighter path in the artifact that never

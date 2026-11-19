@@ -105,9 +105,11 @@ Integers are little-endian; 256-bit quantities are big-endian.
 | 4 | `DISABLE_BASE_FEE` | skip `gasPrice >= block base fee` (revm `disable_base_fee`) |
 | 5 | `DISABLE_BALANCE_CHECK` | skip `balance >= gasLimit * gasPrice + value` (revm `disable_balance_check`) |
 | 6 | `DISABLE_BLOCK_GAS_LIMIT` | skip `gasLimit <= block gas limit` (revm `disable_block_gas_limit`) |
-| 7+ | reserved | unallocated; an artifact that does not know a bit ignores it |
+| 7 | `DISABLE_EIP3607` | skip EIP-3607, which rejects a sender with deployed code (revm `disable_eip3607`) |
+| 8 | `DISABLE_TX_GAS_LIMIT_CAP` | lift EIP-7825's per-transaction gas cap (revm `tx_gas_limit_cap = Some(u64::MAX)`); no effect before Osaka or from Amsterdam on |
+| 9+ | reserved | unallocated; an artifact that does not know a bit ignores it |
 
-Bits 4 to 6 need the `relaxed-validation` cargo feature, which the shipped build enables. An artifact built without it ignores them, and the check the caller asked to skip then rejects the transaction with revm's own reason: loud, never a silently different number. The TypeScript layer refuses the options up front in that case, and refuses them on any committing path (see ADR 0006).
+Bits 7 and 8 are not set by `RELAX_VALIDATION`. Bits 4 to 8 need the `relaxed-validation` cargo feature, which the shipped build enables. An artifact built without it ignores them, and the check the caller asked to skip then rejects the transaction with revm's own reason: loud, never a silently different number. The TypeScript layer refuses the options up front in that case, and refuses them on any committing path (see ADR 0006).
 
 `CHECK_NONCE` is off in the raw ABI unless set. The TypeScript layer defaults it **on** for `transact` and `create` and **off** for `call`, because a transaction executed without a nonce check is silently replayable and that is not a default worth shipping.
 

@@ -605,6 +605,244 @@ describe('the simulation switches (eth_call semantics)', () => {
 	});
 });
 
+describe('disableTxGasLimitCap (EIP-7825)', () => {
+	// GAS; PUSH0; MSTORE; PUSH1 0x20; PUSH0; RETURN: returns the gas left after
+	// the GAS opcode itself, i.e. the budget the contract was handed minus 2.
+	const GAS_PROBE = unhex('5a5f5260205ff3');
+	const CAP = 16_777_216n;
+	// 30M of execution gas plus the 21,000 intrinsic of a calldata-less call.
+	const ABOVE_CAP = 30_021_000n;
+	// High enough that the block gas limit is never what rejects a call here.
+	const BLOCK = {gasLimit: 60_000_000n};
+
+	const probe = () =>
+		evmWith([{address: CALLER}, {address: TARGET, code: GAS_PROBE}]);
+	const raw = (
+		evm: ReturnType<typeof probe>['evm'],
+		options: Parameters<typeof encodeRequest>[0],
+		flags: number,
+	) =>
+		evm.executeRaw(
+			encodeRequest(
+				options,
+				{spec: Spec.CANCUN, chainId: 1n, block: {}},
+				flags,
+			),
+		);
+
+	it('lets a call above the cap run at OSAKA with its whole gas limit', () => {
+		const {evm} = probe();
+		const options = {
+			from: CALLER,
+			to: TARGET,
+			gasLimit: ABOVE_CAP,
+			block: BLOCK,
+			spec: 'OSAKA' as const,
+		};
+		const out = evm.call({...options, disableTxGasLimitCap: true});
+		expect(out.status).toBe('success');
+		// The contract saw every unit of gas above the intrinsic, not the cap.
+		expect(asWord(out.returnData)).toBe(ABOVE_CAP - 21_000n - 2n);
+		expect(asWord(out.returnData) > CAP).toBe(true);
+		// 21,000 intrinsic + GAS 2 + PUSH0 2 + MSTORE 3 + 3 memory + PUSH1 3 +
+		// PUSH0 2, i.e. exactly what the same call costs with no cap at all.
+		expect(out.totalGasSpent).toBe(21_015n);
+		const uncapped = evm.call({...options, spec: 'PRAGUE'});
+		expect(uncapped.success).toBe(true);
+		expect(out.totalGasSpent).toBe(uncapped.totalGasSpent);
+		expect(out.gasUsed).toBe(uncapped.gasUsed);
+		expect(out.returnData).toEqual(uncapped.returnData);
+	});
+
+	it('still rejects a call above the cap at OSAKA without the switch', () => {
+		const {evm} = probe();
+		const options = {
+			from: CALLER,
+			to: TARGET,
+			gasLimit: ABOVE_CAP,
+			block: BLOCK,
+			spec: 'OSAKA' as const,
+		};
+		for (const out of [
+			evm.call(options),
+			evm.call({...options, disableTxGasLimitCap: false}),
+			// The block gas limit switch is a different check and does not help.
+			evm.call({...options, disableBlockGasLimit: true}),
+		]) {
+			expect(out.status).toBe('validation-error');
+			expect(out.error).toContain('TxGasLimitGreaterThanCap');
+			expect(out.error).toContain('30021000');
+			expect(out.error).toContain('16777216');
+		}
+	});
+
+	it('does not leak into the next call on the same instance', () => {
+		const {evm} = probe();
+		const options = {
+			from: CALLER,
+			to: TARGET,
+			gasLimit: ABOVE_CAP,
+			block: BLOCK,
+			spec: 'OSAKA' as const,
+		};
+		expect(evm.call({...options, disableTxGasLimitCap: true}).success).toBe(
+			true,
+		);
+		const after = evm.call(options);
+		expect(after.status).toBe('validation-error');
+		expect(after.error).toContain('TxGasLimitGreaterThanCap');
+	});
+
+	it('is a byte-for-byte no-op where there is no cap to lift', () => {
+		const {evm} = probe();
+		const cases = [
+			// No cap before Osaka, so even a gas limit above it is untouched.
+			{spec: 'CANCUN' as const, gasLimit: ABOVE_CAP},
+			{spec: 'PRAGUE' as const, gasLimit: ABOVE_CAP},
+			// At Osaka, within the cap.
+			{spec: 'OSAKA' as const, gasLimit: 1_000_000n},
+			{spec: 'OSAKA' as const, gasLimit: CAP},
+			// From Amsterdam the cap meters instead of rejecting; the switch is
+			// ignored rather than allowed to change how gas is split.
+			{spec: 'AMSTERDAM' as const, gasLimit: ABOVE_CAP},
+		];
+		for (const c of cases) {
+			const options = {from: CALLER, to: TARGET, block: BLOCK, ...c};
+			const without = raw(evm, options, 0);
+			const withSwitch = raw(evm, options, Flags.DISABLE_TX_GAS_LIMIT_CAP);
+			expect(withSwitch).toEqual(without);
+			expect(decodeOutcome(without).success).toBe(true);
+			// And through the typed API.
+			expect(evm.call({...options, disableTxGasLimitCap: true})).toEqual(
+				evm.call(options),
+			);
+		}
+	});
+
+	it('is not set by the legacy RELAX_VALIDATION bit', () => {
+		const {evm} = probe();
+		const options = {
+			from: CALLER,
+			to: TARGET,
+			gasLimit: ABOVE_CAP,
+			block: BLOCK,
+			spec: 'OSAKA' as const,
+		};
+		const relaxed = decodeOutcome(raw(evm, options, Flags.RELAX_VALIDATION));
+		expect(relaxed.status).toBe('validation-error');
+		expect(relaxed.error).toContain('TxGasLimitGreaterThanCap');
+	});
+
+	it('refuses to commit an execution above the cap', () => {
+		const {evm, state} = evmWith([
+			{address: CALLER},
+			{address: TARGET, code: STORE_ONE},
+		]);
+		const options = {
+			from: CALLER,
+			to: TARGET,
+			gasLimit: ABOVE_CAP,
+			block: BLOCK,
+			spec: 'OSAKA' as const,
+			disableTxGasLimitCap: true,
+		};
+		expect(() => evm.transact(options)).toThrow(/simulation-only/);
+		expect(() => evm.transact({...options, commit: true})).toThrow(
+			/simulation-only/,
+		);
+		expect(() => evm.create({...options, data: DEPLOY_RETURN_42})).toThrow(
+			/simulation-only/,
+		);
+		expect(() =>
+			evm.create({...options, data: DEPLOY_RETURN_42, commit: true}),
+		).toThrow(/simulation-only/);
+		// Nothing was written: the caller's nonce is untouched.
+		expect(state.getAccount(CALLER)!.nonce).toBe(0n);
+
+		// The explicitly non-committing simulation is allowed.
+		expect(evm.transact({...options, commit: false}).success).toBe(true);
+	});
+
+	it('lets a non-committing create above the cap run at OSAKA', () => {
+		// How a deployment is estimated: create without committing, nonce
+		// unchecked, with a gas limit above the cap.
+		const {evm, state} = evmWith([{address: CALLER}]);
+		const options = {
+			from: CALLER,
+			data: DEPLOY_RETURN_42,
+			gasLimit: ABOVE_CAP,
+			block: BLOCK,
+			spec: 'OSAKA' as const,
+			commit: false,
+			checkNonce: false,
+		};
+		const rejected = evm.create(options);
+		expect(rejected.status).toBe('validation-error');
+		expect(rejected.error).toContain('TxGasLimitGreaterThanCap');
+
+		const out = evm.create({...options, disableTxGasLimitCap: true});
+		expect(out.status).toBe('success');
+		expect(out.returnData).toEqual(RETURN_42);
+		// Same cost as the same deployment where there is no cap.
+		expect(out.totalGasSpent).toBe(
+			evm.create({...options, spec: 'PRAGUE'}).totalGasSpent,
+		);
+		// Not committed.
+		expect(state.getAccount(CALLER)!.nonce).toBe(0n);
+	});
+
+	it('still enforces the EIP-7623 calldata floor', () => {
+		const {evm} = probe();
+		const base = {
+			from: CALLER,
+			to: TARGET,
+			block: BLOCK,
+			spec: 'OSAKA' as const,
+			disableTxGasLimitCap: true,
+		};
+
+		// 1,000 non-zero bytes: intrinsic 21,000 + 16 * 1,000 = 37,000, floor
+		// 21,000 + 40 * 1,000 = 61,000. A limit between the two is enough to pay
+		// for the intrinsic gas but not the floor.
+		const small = evm.call({
+			...base,
+			data: new Uint8Array(1_000).fill(0xff),
+			gasLimit: 50_000n,
+		});
+		expect(small.status).toBe('validation-error');
+		expect(small.error).toContain('GasFloorMoreThanGasLimit');
+
+		// Above the cap too: 800,000 non-zero bytes put the floor at 32,021,000,
+		// above a 30,021,000 limit whose intrinsic gas (12,821,000) it covers.
+		// Without the switch the cap rejects first; with it the floor still does.
+		const big = {
+			...base,
+			data: new Uint8Array(800_000).fill(0xff),
+			gasLimit: ABOVE_CAP,
+		};
+		const capped = evm.call({...big, disableTxGasLimitCap: false});
+		expect(capped.error).toContain('TxGasLimitGreaterThanCap');
+		const floored = evm.call(big);
+		expect(floored.status).toBe('validation-error');
+		expect(floored.error).toContain('GasFloorMoreThanGasLimit');
+		expect(floored.error).toContain('32021000');
+	});
+
+	it('still enforces the intrinsic-gas check', () => {
+		const {evm} = probe();
+		const out = evm.call({
+			from: CALLER,
+			to: TARGET,
+			gasLimit: 20_999n,
+			block: BLOCK,
+			spec: 'OSAKA',
+			disableTxGasLimitCap: true,
+		});
+		expect(out.status).toBe('validation-error');
+		expect(out.error).toContain('CallGasCostMoreThanGasLimit');
+	});
+});
+
 describe('the block environment', () => {
 	const PREV_RANDAO = unhex(
 		'0xfeed0000000000000000000000000000000000000000000000000000000000ff',

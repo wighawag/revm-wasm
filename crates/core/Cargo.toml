@@ -32,7 +32,9 @@ blst = ["revm/blst"]
 std = ["revm/std"]
 
 # revm's optional validation switches, reachable per request through flag bits
-# 4, 5, 6 and 7 (and the legacy bit 2, which sets the original three).
+# 4, 5, 6, 7 and 8 (and the legacy bit 2, which sets the original three). Bit 8
+# (the EIP-7825 gas cap) needs no revm feature, since `CfgEnv::tx_gas_limit_cap`
+# always exists, but is gated here with the others.
 #
 # SHIPPED, and part of `default`. It was measurement-only while the relaxation
 # had no consumer: the spike priced it at 0.01 microseconds, i.e. nothing, and a
