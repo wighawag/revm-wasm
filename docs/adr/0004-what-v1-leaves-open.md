@@ -62,6 +62,8 @@ The arithmetic is not close. A state read currently costs one boundary crossing 
 
 Concretely: a new flag bit turns tracing on for one call, the trace is appended to the outcome as a new section after the existing ones, and `outcomeFormatVersion` goes to 4.
 
+> Written when the format was at v3. The first capability to take this route was not a tracer but a much narrower recorder of call inputs to one address (`recordCallsTo`, flag bit 9, outcome v5; [ADR 0007](0007-call-input-recorder.md)). It buffers in wasm as this rule requires, and it avoids the `tracer` build blocker below by observing from `FixedPrecompiles::run` instead of an inspector. A real tracer is still unbuilt and still has to clear that blocker.
+
 ### What we already know it costs, and what we do not
 
 Measured on this machine, by the ablation method, and recorded in `measurements/tracer-size.json`:

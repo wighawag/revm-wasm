@@ -4,7 +4,7 @@ import type {BlockEnv, ExecuteOptions} from './types.js';
 /**
  * Per-call flag bits. These mirror `revm_wasm_core::flags` exactly.
  *
- * **Bits 9 and above are unallocated and reserved**, on purpose. A future
+ * **Bits 10 and above are unallocated and reserved**, on purpose. A future
  * per-call capability (a trace, a build-variant switch, a custom-precompile
  * opt-in) can be enabled by setting a new bit, with no new argument and no
  * breaking change at any entry point. An artifact that does not know a bit
@@ -27,6 +27,12 @@ export const Flags = {
 	DISABLE_EIP3607: 1 << 7,
 	/** `disableTxGasLimitCap`: lift EIP-7825's per-transaction gas cap. */
 	DISABLE_TX_GAS_LIMIT_CAP: 1 << 8,
+	/**
+	 * `recordCallsTo`: record the input of every call frame running one address's
+	 * code. Observation only, so NOT a simulation flag. The request then carries
+	 * a trailing `[20]` target after the extras section (ADR 0007).
+	 */
+	RECORD_CALLS: 1 << 9,
 } as const;
 
 /**
@@ -245,7 +251,15 @@ export function encodeRequest(
 	const data = o.data ?? EMPTY;
 	const extras = needsExtras(o, block) ? encodeExtras(o, block) : EMPTY;
 
-	const out = new Uint8Array(REQ_HEAD + 4 + data.length + 4 + extras.length);
+	// Appended after the extras section, present only with RECORD_CALLS. An
+	// artifact that predates it ignores both the bit and the trailing bytes.
+	const record = flags & Flags.RECORD_CALLS ? 20 : 0;
+	if (record && o.recordCallsTo === undefined)
+		throw new Error('revm-wasm: RECORD_CALLS set without recordCallsTo');
+
+	const out = new Uint8Array(
+		REQ_HEAD + 4 + data.length + 4 + extras.length + record,
+	);
 	out[0] = REQUEST_FORMAT_VERSION;
 	out[1] = specToByte(specOverride ?? o.spec, defaults.spec);
 	writeU32LE(out, 4, flags);
@@ -264,6 +278,7 @@ export function encodeRequest(
 	const extrasAt = REQ_HEAD + 4 + data.length;
 	writeU32LE(out, extrasAt, extras.length);
 	if (extras.length > 0) out.set(extras, extrasAt + 4);
+	if (record) copyRight(out, extrasAt + 4 + extras.length, 20, o.recordCallsTo);
 	return out;
 }
 

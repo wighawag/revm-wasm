@@ -8,20 +8,20 @@ Everything below is produced and consumed in exactly two files: `crates/core/src
 
 This is the part that matters more than any individual field.
 
-1. **The head stays at fixed offsets across versions.** In the outcome blob that is `status | gasUsed | totalGasSpent | refunded | returnData`, which has been at identical offsets in v1, v2, v3 and v4. In the request blob it is offsets 0..140.
+1. **The head stays at fixed offsets across versions.** In the outcome blob that is `status | gasUsed | totalGasSpent | refunded | returnData`, which has been at identical offsets in v1, v2, v3, v4 and v5. In the request blob it is offsets 0..140.
 2. **New sections are appended after the head**, never inserted into it.
 3. **The version is readable at runtime**, so a decoder can refuse a format it does not understand rather than misread it:
 
 ```ts
-evm.outcomeFormatVersion; // 4
+evm.outcomeFormatVersion; // 5
 evm.abiVersion; // 1
 ```
 
-That discipline is the only reason a downstream decoder survived v1 (read-only) to v2 (logs and code bytes) to v3 (conditional bloom and trailing effective gas price) to v4 (trailing EIP-4844 blob gas fields). A future trace section is the same move again.
+That discipline is the only reason a downstream decoder survived v1 (read-only) to v2 (logs and code bytes) to v3 (conditional bloom and trailing effective gas price) to v4 (trailing EIP-4844 blob gas fields) to v5 (the request-gated recorded-calls section). A future trace section is the same move again.
 
-**Flag-word bits 4 and above are unallocated and reserved**, so a future per-call capability needs no new argument. See ADR 0004.
+**Flag-word bits 10 and above are unallocated and reserved**, so a future per-call capability needs no new argument. See ADR 0004.
 
-## Outcome blob, version 4
+## Outcome blob, version 5
 
 ```text
 u8   status: 0 success, 1 revert, 2 halt, 3 validation error
@@ -48,9 +48,17 @@ u32  account count, then per account (sorted by address):
 [16] effective gas price (BE)
 u64  blob gas used (LE)   == revm's `Transaction::total_blob_gas`
 [16] blob gas price (BE)  == revm's `Block::blob_gasprice`
+--- v5: ONLY when the request set flag bit 9 (RECORD_CALLS) ---
+u32  recorded call count, then per call, in the order frames were entered:
+       u32 input length, then bytes
+u32  byte length of the section above (a FOOTER: read it from the end)
 ```
 
-### The three things a hand-rolled decoder gets wrong
+### The recorded-calls section (v5)
+
+Present when, and only when, the request set `RECORD_CALLS` (`recordCallsTo` in the API). **Everything before it is byte-for-byte the v4 blob the same request produces without the bit**, whichever path produced that: a full outcome, the light head, or a validation error. That is why it carries a footer. A decoder that set the bit reads the last 4 bytes, strips the section and the footer off the end, and decodes the rest exactly as v4, with no branch on status or path. A requested section is always present, so an empty list means nothing called the address. Each entry is the input of one call frame whose **code** address is the target (CALL, STATICCALL, DELEGATECALL and CALLCODE alike), including frames that later revert. See ADR 0007.
+
+### The four things a hand-rolled decoder gets wrong
 
 Both of these have broken a real consumer.
 
@@ -60,6 +68,8 @@ Both of these have broken a real consumer.
 
 **3. The two trailing blob-gas fields are UNCONDITIONAL.** They are always present, zero for a non-blob transaction, rather than made conditional on the versioned-hash count. The bloom's conditionality (point 1) is exactly the shape that bites a hand-rolled decoder, and two small fixed-width fields (24 bytes total) do not pay for that hazard, so a decoder never has to branch on a count it has already parsed to know where the next section starts. `blobGasUsed` is revm's own `Transaction::total_blob_gas` (the versioned-hash count times `GAS_PER_BLOB`) and `blobGasPrice` is revm's own `Block::blob_gasprice` (`calc_blob_gasprice` over the block's excess blob gas), not a second implementation of the EIP-4844 fee rule. A consumer building a type-3 receipt reads them straight off the outcome; the previous gap forced `embedded-eth-node` to refuse blob transactions rather than return an incomplete receipt.
 
+**4. A blob from a request that set bit 9 must have its recorded-calls section stripped before it is decoded as v4.** A plain v4 decoder silently ignores the section on the full path, but on the light path and on a validation error it parses the section as logs and accounts. Read the 4-byte footer, drop `section + 4` bytes off the end, and decode the rest; `decodeOutcome(buf, {recordedCalls: true})` does exactly that.
+
 ### Other things worth knowing
 
 - **Logs are not sorted.** Emission order is the semantics receipts and `eth_getLogs` need, and it is already deterministic. Accounts and slots *are* sorted by key, so the blob is byte-for-byte diffable between two runners.
@@ -68,7 +78,7 @@ Both of these have broken a real consumer.
 - **Expect `deleted` on the coinbase constantly.** With a zero priority fee the coinbase is credited nothing, stays touched-and-empty, and is correctly deleted. `@ethereumjs/vm` does the same. It looks alarming the first time.
 - **The effective gas price is revm's own** `Transaction::effective_gas_price`, not a second implementation of `min(maxFee, baseFee + tip)`. It is trailing, so anything that decodes sequentially and stops after the account list is unaffected. It costs about 1.7 KB gzipped in the artifact for a 16-byte field, which is out of proportion and unexplained, and it is still the right trade: the alternative is reimplementing fee arithmetic host-side.
 - **A validation error (status 3)** carries revm's own `InvalidTransaction` variant as UTF-8 text in the return-data slot, for example `NonceTooHigh { tx: 99, state: 5 }`. The decoder surfaces it as `outcome.error`.
-- **The light path stops after the head.** `returnState: false` returns status, gas and return data only, with no logs, no bloom, no state and no trailing price. It is worth about 0.9 microseconds per call, all of it from skipping the state encoding.
+- **The light path stops after the head.** `returnState: false` returns status, gas and return data only, with no logs, no bloom, no state and no trailing price (only the v5 recorded-calls section, when requested, follows it). It is worth about 0.9 microseconds per call, all of it from skipping the state encoding.
 - **The trailing blob-gas fields close a reporting gap, not an execution gap.** The artifact already executed blob transactions correctly (`BLOBHASH`, `BLOBBASEFEE`, versioned-hash validation, the fee charge); what was missing was `blobGasUsed` and `blobGasPrice` on the *outcome*, so a consumer building an EIP-4844 type-3 receipt could not fill those two fields without reimplementing `fake_exponential` in JavaScript. Both are revm's own — `Transaction::total_blob_gas` and `Block::blob_gasprice` — and both are written unconditionally (zero for a non-blob transaction), for the reason in point 3 above. `embedded-eth-node` previously worked around the gap by refusing blob transactions; it can now stop.
 
 ## Request blob, version 1
@@ -90,6 +100,7 @@ Both of these have broken a real consumer.
 --- everything above is the HEAD and is at fixed offsets 0..140 ---
 140  u32  calldata / init-code length, then bytes
 +    u32  extras length (0 for none), then the extras blob
++    [20] record-calls target, present ONLY when flag bit 9 is set
 ```
 
 Integers are little-endian; 256-bit quantities are big-endian.
@@ -107,9 +118,10 @@ Integers are little-endian; 256-bit quantities are big-endian.
 | 6 | `DISABLE_BLOCK_GAS_LIMIT` | skip `gasLimit <= block gas limit` (revm `disable_block_gas_limit`) |
 | 7 | `DISABLE_EIP3607` | skip EIP-3607, which rejects a sender with deployed code (revm `disable_eip3607`) |
 | 8 | `DISABLE_TX_GAS_LIMIT_CAP` | lift EIP-7825's per-transaction gas cap (revm `tx_gas_limit_cap = Some(u64::MAX)`); no effect before Osaka or from Amsterdam on |
-| 9+ | reserved | unallocated; an artifact that does not know a bit ignores it |
+| 9 | `RECORD_CALLS` | record the input of every call frame running the target's code; appends the v5 section (ADR 0007) |
+| 10+ | reserved | unallocated; an artifact that does not know a bit ignores it |
 
-Bits 7 and 8 are not set by `RELAX_VALIDATION`. Bits 4 to 8 need the `relaxed-validation` cargo feature, which the shipped build enables. An artifact built without it ignores them, and the check the caller asked to skip then rejects the transaction with revm's own reason: loud, never a silently different number. The TypeScript layer refuses the options up front in that case, and refuses them on any committing path (see ADR 0006).
+Bits 7 and 8 are not set by `RELAX_VALIDATION`. Bit 9 is not a simulation switch at all: it observes, so it needs no cargo feature and is allowed with `COMMIT`. An artifact that predates it ignores the bit and the trailing target, and the TypeScript layer refuses `recordCallsTo` against an artifact whose `outcomeFormatVersion` is below 5. Bits 4 to 8 need the `relaxed-validation` cargo feature, which the shipped build enables. An artifact built without it ignores them, and the check the caller asked to skip then rejects the transaction with revm's own reason: loud, never a silently different number. The TypeScript layer refuses the options up front in that case, and refuses them on any committing path (see ADR 0006).
 
 `CHECK_NONCE` is off in the raw ABI unless set. The TypeScript layer defaults it **on** for `transact` and `create` and **off** for `call`, because a transaction executed without a nonce check is silently replayable and that is not a default worth shipping.
 

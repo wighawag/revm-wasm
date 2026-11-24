@@ -12,7 +12,7 @@ const ZERO_BLOOM = new Uint8Array(256);
 const decoder = new TextDecoder();
 
 /**
- * The outcome blob layout, version 4.
+ * The outcome blob layout, version 5.
  *
  * ```text
  * u8   status: 0 success, 1 revert, 2 halt, 3 validation error
@@ -33,7 +33,16 @@ const decoder = new TextDecoder();
  * [16] effective gas price (BE)
  * u64  blob gas used (LE)   == revm's Transaction::total_blob_gas
  * [16] blob gas price (BE)  == revm's Block::blob_gasprice
+ * ---- v5: ONLY when the request set RECORD_CALLS (recordCallsTo):
+ * u32  recorded call count, then per call: u32 input length + bytes
+ * u32  byte length of that section (a FOOTER, read from the end)
  * ```
+ *
+ * The v5 section is conditional on the REQUEST, never on the data, and it is
+ * framed by a footer so everything before it is byte-for-byte the v4 blob the
+ * same request produces without it, whichever path produced it (full, light,
+ * validation error). The decoder strips it off the end and decodes the rest
+ * exactly as v4.
  *
  * Three details that a hand-rolled decoder gets wrong, two of which have bitten
  * a real consumer:
@@ -54,9 +63,18 @@ const decoder = new TextDecoder();
  *
  * The head is at fixed offsets across versions and new sections are appended
  * after it. That discipline is the only reason a downstream decoder survived v1
- * to v2 to v3 to v4, and it is what a future trace section would follow.
+ * to v2 to v3 to v4 to v5, and it is what a future trace section would follow.
  */
-export const OUTCOME_FORMAT_VERSION = 4;
+export const OUTCOME_FORMAT_VERSION = 5;
+
+/** What the caller asked for, which the blob itself does not restate. */
+export interface DecodeOptions {
+	/**
+	 * The request set `recordCallsTo` (flag RECORD_CALLS), so the blob ends
+	 * with the recorded-calls section and its footer.
+	 */
+	recordedCalls?: boolean;
+}
 
 /**
  * Decode one outcome blob.
@@ -64,7 +82,14 @@ export const OUTCOME_FORMAT_VERSION = 4;
  * `bloomWhenAbsent` is returned by reference when a call emitted no logs; it is
  * a shared all-zero array and must not be mutated by a caller.
  */
-export function decodeOutcome(buf: Uint8Array): Outcome {
+export function decodeOutcome(
+	buf: Uint8Array,
+	options: DecodeOptions = {},
+): Outcome {
+	if (options.recordedCalls) {
+		const {rest, calls} = splitRecordedCalls(buf);
+		return {...decodeOutcome(rest), recordedCalls: calls};
+	}
 	const dv = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
 	let o = 0;
 
@@ -198,6 +223,40 @@ export function decodeOutcome(buf: Uint8Array): Outcome {
 		logsBloom,
 		stateChanges,
 	};
+}
+
+/** Strip the v5 recorded-calls section (and its footer) off the end. */
+function splitRecordedCalls(buf: Uint8Array): {
+	rest: Uint8Array;
+	calls: Uint8Array[];
+} {
+	const dv = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
+	if (buf.length < 8)
+		throw new Error('revm-wasm: outcome has no recorded-calls section');
+	const sectionLen = dv.getUint32(buf.length - 4, true);
+	const start = buf.length - 4 - sectionLen;
+	if (sectionLen < 4 || start < 0)
+		throw new Error('revm-wasm: malformed recorded-calls section');
+	const end = buf.length - 4;
+	const malformed = () =>
+		new Error('revm-wasm: malformed recorded-calls section');
+	let o = start;
+	const n = dv.getUint32(o, true);
+	o += 4;
+	// Every entry is at least its 4-byte length, so a corrupt count is caught
+	// before any work rather than by running off the buffer.
+	if (n > (end - o) / 4) throw malformed();
+	const calls: Uint8Array[] = [];
+	for (let i = 0; i < n; i++) {
+		if (o + 4 > end) throw malformed();
+		const len = dv.getUint32(o, true);
+		o += 4;
+		if (o + len > end) throw malformed();
+		calls.push(buf.slice(o, o + len));
+		o += len;
+	}
+	if (o !== end) throw new Error('revm-wasm: malformed recorded-calls section');
+	return {rest: buf.subarray(0, start), calls};
 }
 
 function readBE(dv: DataView, offset: number): bigint {

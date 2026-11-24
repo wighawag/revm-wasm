@@ -235,11 +235,26 @@ export class Revm {
 				);
 			}
 		}
+		const record = options.recordCallsTo !== undefined;
+		if (record) {
+			// Observation, not a simulation switch: allowed on every path,
+			// committing included. What is refused is an artifact that predates
+			// it, because it would ignore the bit and the caller would get an empty
+			// list that looks like "nothing called the address".
+			if (this.outcomeFormatVersion < 5) {
+				throw new Error(
+					`revm-wasm: this artifact (build "${this.info.build}", outcome format ` +
+						`v${this.outcomeFormatVersion}) predates recordCallsTo, which needs ` +
+						'outcome format v5. Use the shipped revm.wasm.',
+				);
+			}
+			flags |= Flags.RECORD_CALLS;
+		}
 		const blob = this.executeRaw(
 			encodeRequest(options, this.#defaults, flags),
 			{light},
 		);
-		return decodeOutcome(blob);
+		return decodeOutcome(blob, {recordedCalls: record});
 	}
 
 	/**

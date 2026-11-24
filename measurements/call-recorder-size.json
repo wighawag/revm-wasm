@@ -1,0 +1,17 @@
+{
+  "measuredAt": "2026-11-24T07:50:00.000Z",
+  "method": "same source with and without the call recorder (ADR 0007), shipped features precompiles-all,relaxed-validation, gzip -9 -c, same rustc 1.91.1 and wasm-opt 131",
+  "before": {
+    "source": "main @ e2d00f9, rebuilt",
+    "rawOptimised": 1232873,
+    "gz": 422114
+  },
+  "after": {
+    "source": "main @ e2d00f9 + recordCallsTo",
+    "rawOptimised": 1232403,
+    "gz": 422249
+  },
+  "deltaRawBytes": -470,
+  "deltaGzBytes": 135,
+  "caveat": "Inside the noise floor (an earlier build of the same change measured -289 gz; the raw delta is negative). Sub-kilobyte deltas on a 420 KB artifact are not trustworthy (ADR 0004, ADR 0006). Report as: no measurable size cost. The committed main artifact measured 422132 gz, 18 bytes from the rebuild of the same source, consistent with ADR 0005."
+}

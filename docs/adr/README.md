@@ -8,5 +8,6 @@
 | [0004](0004-what-v1-leaves-open.md) | what v1 deliberately leaves open, and the rules for adding it | a tracer, custom precompiles and build variants must stay additive |
 | [0005](0005-pinned-toolchain.md) | pin revm, rustc and wasm-opt; accept behaviourally, not byte for byte | three things move the bytes, and the bytes are not the contract |
 | [0006](0006-simulation-switches.md) | expose revm's validation switches, off by default, never committed | a read had to lie about the base fee to be servable at all |
+| [0007](0007-call-input-recorder.md) | record call inputs to one address, through the precompile seam, not an inspector | `console.log` must be observable without a precompile changing gas |
 
 If you are about to change the build configuration, read 0001 first. If you are about to add a capability, read 0004 first.

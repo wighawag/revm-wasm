@@ -233,6 +233,32 @@ export interface ExecuteOptions {
 	 * genuinely wants nothing but the return value and the gas.
 	 */
 	returnState?: boolean;
+
+	/**
+	 * Record the input bytes of every call frame that runs this address's code,
+	 * and return them as {@link Outcome.recordedCalls}. Off unless set.
+	 *
+	 * Built for Hardhat / forge-std `console.log`, which STATICCALLs the empty
+	 * account `0x000000000000000000636F6e736F6c652e6c6f67` with ABI-encoded
+	 * arguments, but any address works. It OBSERVES: gas, return data, logs and
+	 * state changes are exactly what they are without it, and nothing is
+	 * pre-warmed (a precompile at that address would be, and would make the
+	 * first touch in each transaction 2,500 gas cheaper than on a real chain:
+	 * 100 instead of 2,600).
+	 *
+	 * - Matched on the frame's CODE address: CALL and STATICCALL to the address,
+	 *   and DELEGATECALL / CALLCODE into it, are all recorded. The transaction's
+	 *   own top-level call counts when `to` is the address. CREATE never does.
+	 * - In the order frames are entered, INCLUDING frames inside sub-calls that
+	 *   later revert and frames of a transaction that reverts as a whole.
+	 * - A frame refused before it runs (call depth over 1024, a value the caller
+	 *   cannot afford) is not recorded.
+	 *
+	 * Allowed on every entry point, committing or not, and with
+	 * `returnState: false`. Needs an artifact with outcome format 5 or later; an
+	 * older one is refused rather than returning a silently empty list.
+	 */
+	recordCallsTo?: Address;
 }
 
 /** One emitted log, in emission order. */
@@ -332,4 +358,10 @@ export interface Outcome {
 	logsBloom?: Uint8Array;
 	/** Undefined when `returnState: false` was requested. */
 	stateChanges?: AccountChange[];
+	/**
+	 * Input bytes of every call frame that ran the `recordCallsTo` address's
+	 * code, in the order the frames were entered. Present (possibly empty)
+	 * exactly when `recordCallsTo` was set, undefined otherwise.
+	 */
+	recordedCalls?: Uint8Array[];
 }

@@ -6,7 +6,8 @@
  *
  * Deliberately not a general-purpose binding. The build configuration is fixed
  * (all precompiles, opt-level 3: see `docs/adr/0001-...`), the host interface
- * has one shape, and v1 ships no custom precompiles and no inspector.
+ * has one shape, and it ships no custom precompiles and no inspector (the one
+ * observation hook is `recordCallsTo`, see ADR 0007).
  */
 
 export {createRevm, createRevmSync, Revm} from './instance.js';
@@ -27,6 +28,7 @@ export {Spec} from './spec.js';
 export type {SpecInput, SpecName} from './spec.js';
 
 export {decodeOutcome, OUTCOME_FORMAT_VERSION} from './outcome.js';
+export type {DecodeOptions} from './outcome.js';
 export {encodeRequest, Flags, SIMULATION_FLAGS} from './request.js';
 export type {RequestDefaults} from './request.js';
 

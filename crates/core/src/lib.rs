@@ -46,7 +46,7 @@ pub use revm;
 /// Per-request behaviour switches. Deliberately explicit: an `eth_call` must
 /// never commit, a transaction always must, and the caller decides which it is.
 ///
-/// **Bits 9 and above are unallocated and reserved.** That is a forward
+/// **Bits 10 and above are unallocated and reserved.** That is a forward
 /// compatibility guarantee, not an accident: a future per-call capability (a
 /// trace, a size-variant switch, a custom-precompile opt-in) can be enabled by
 /// setting a new bit, without adding an argument and without a breaking change
@@ -137,6 +137,18 @@ pub mod flags {
     /// rather than allowed to change metering. Off, the field is
     /// left at `None` (revm's spec default), exactly as before the bit existed.
     pub const DISABLE_TX_GAS_LIMIT_CAP: u32 = 1 << 8;
+
+    // -- observation ----------------------------------------------------------
+
+    /// Record the input bytes of every call frame whose CODE address is the
+    /// request's record target, and append them to the outcome (format v5).
+    /// See [`crate::CallRecorder`] and ADR 0007.
+    ///
+    /// Observation only: it changes no gas, no state, no return data and no
+    /// log, and it is not a simulation switch, so it is allowed on a committing
+    /// path. When set, the request carries a trailing `[20]` target after the
+    /// extras section. An artifact that predates the bit ignores both.
+    pub const RECORD_CALLS: u32 = 1 << 9;
 }
 
 /// The transaction-level validations a simulation may switch off, resolved from
@@ -537,16 +549,62 @@ fn precompiles_for(spec: SpecId) -> &'static Precompiles {
 ///
 /// `run` still delegates to the stock `EthPrecompiles` implementation, so gas
 /// accounting and error mapping are unmodified revm.
+///
+/// It is also where the call recorder lives ([`CallRecorder`]), because
+/// revm's `EthFrame::make_call_frame` asks the precompile provider about EVERY
+/// call frame (to find out whether it is a precompile) before it loads any
+/// bytecode. That makes `run` a per-frame observation point that needs no
+/// inspector: recording there touches neither the journal nor the gas, and
+/// `warm_addresses`/`contains` are not involved, so nothing gets pre-warmed.
 #[derive(Debug)]
 pub struct FixedPrecompiles {
     inner: EthPrecompiles,
+    /// The per-request call recorder. Reset on every request by
+    /// [`CallExecutor`], because the executor (and so this provider) is
+    /// persistent.
+    pub recorder: CallRecorder,
 }
 
 impl FixedPrecompiles {
     pub fn new(precompiles: &'static Precompiles, spec: SpecId) -> Self {
         Self {
             inner: EthPrecompiles { precompiles, spec },
+            recorder: CallRecorder::default(),
         }
+    }
+}
+
+/// Records the input bytes of every call frame whose code address is one given
+/// address, in the order the frames are entered.
+///
+/// Built for `console.log` (Hardhat and forge-std STATICCALL the empty account
+/// `0x000000000000000000636F6e736F6c652e6c6f67`), but the target is a request
+/// parameter, never hard-coded. Deliberately NOT a tracer: one address, input
+/// bytes only. See ADR 0007.
+///
+/// * **Matched on `CallInputs::bytecode_address`**, the address whose code the
+///   frame runs. For CALL and STATICCALL that is the target; DELEGATECALL and
+///   CALLCODE into the address are recorded too. This is the same field revm
+///   dispatches precompiles on.
+/// * **Survives reverts.** The buffer is outside the journal, so a frame inside
+///   a sub-call that later reverts, and every frame of a transaction that
+///   reverts as a whole, is still recorded.
+/// * **Only frames that are entered.** `make_call_frame` consults the provider
+///   after its depth check and value transfer, so a frame refused for depth or
+///   for an unaffordable value is not recorded: it never ran.
+#[derive(Debug, Default)]
+pub struct CallRecorder {
+    pub target: Option<Address>,
+    pub calls: Vec<revm::primitives::Bytes>,
+}
+
+impl CallRecorder {
+    /// Arm (or disarm, with `None`) for one request and drop anything recorded
+    /// by the previous one.
+    #[inline]
+    pub fn reset(&mut self, target: Option<Address>) {
+        self.target = target;
+        self.calls.clear();
     }
 }
 
@@ -566,6 +624,12 @@ impl<CTX: ContextTr> PrecompileProvider<CTX> for FixedPrecompiles {
         context: &mut CTX,
         inputs: &CallInputs,
     ) -> Result<Option<Self::Output>, String> {
+        // Off (the default) this is one `None` check per call frame.
+        if let Some(target) = self.recorder.target {
+            if inputs.bytecode_address == target {
+                self.recorder.calls.push(inputs.input.bytes(context));
+            }
+        }
         PrecompileProvider::<CTX>::run(&mut self.inner, context, inputs)
     }
 
@@ -812,9 +876,21 @@ pub struct CallRequest {
     /// Fee market, access list and typed-transaction fields. Defaults to the
     /// part-1/part-2 behaviour (everything zero, no lists).
     pub extras: TxExtras,
+    /// The [`CallRecorder`] target. Honoured only together with
+    /// [`flags::RECORD_CALLS`] (see [`CallRequest::record_target`]); the
+    /// outcome then carries the recorded-calls section.
+    pub record_calls_to: Option<[u8; 20]>,
 }
 
 impl CallRequest {
+    /// The recorder target, `Some` only when BOTH the flag bit and the address
+    /// are present, so a hand-built request cannot get a section the flag
+    /// does not ask for, or miss one it does.
+    #[inline]
+    pub fn record_target(&self) -> Option<[u8; 20]> {
+        self.record_calls_to
+            .filter(|_| self.flags & flags::RECORD_CALLS != 0)
+    }
     #[inline]
     pub fn is_create(&self) -> bool {
         self.flags & flags::CREATE != 0
@@ -939,6 +1015,10 @@ impl<H: HostDb> CallExecutor<H> {
     /// when the caller did not ask" means "inherit it from whatever ran last",
     /// which is a cross-call leak rather than a default.
     fn apply_env(&mut self, req: &CallRequest) {
+        self.evm
+            .precompiles
+            .recorder
+            .reset(req.record_target().map(Address::from));
         let blob_fraction = self.evm.ctx.cfg.blob_base_fee_update_fraction();
         apply_block(&mut self.evm.ctx.block, blob_fraction, req);
         self.evm.ctx.cfg.disable_nonce_check = !req.checks_nonce();
@@ -982,7 +1062,7 @@ impl<H: HostDb> CallExecutor<H> {
 
         let tx = match build_tx(req) {
             Ok(tx) => tx,
-            Err(e) => return encode_validation_error(&e),
+            Err(e) => return self.finish(req, encode_validation_error(&e)),
         };
         let effective_gas_price = if EMIT_EFFECTIVE_GAS_PRICE {
             tx.effective_gas_price(req.extras.basefee as u128)
@@ -1018,10 +1098,23 @@ impl<H: HostDb> CallExecutor<H> {
                 if COMMIT_ENABLED && req.wants_commit() {
                     self.evm.ctx.journaled_state.database.commit(res.state);
                 }
-                blob
+                self.finish(req, blob)
             }
-            Err(e) => encode_validation_error(&format!("{e:?}")),
+            Err(e) => self.finish(req, encode_validation_error(&format!("{e:?}"))),
         }
+    }
+
+    /// Append the recorded-calls section when the request asked for it, and
+    /// leave the blob byte-identical when it did not. Every return of both
+    /// execution paths goes through here, so a requested section is ALWAYS
+    /// present (empty for a pre-execution validation error), and a decoder that knows it
+    /// asked never has to guess.
+    fn finish(&mut self, req: &CallRequest, mut blob: Vec<u8>) -> Vec<u8> {
+        if req.record_target().is_some() {
+            encode_recorded_calls(&mut blob, &self.evm.precompiles.recorder.calls);
+            self.evm.precompiles.recorder.calls.clear();
+        }
+        blob
     }
 
     /// Lighter `eth_call` path: identical execution, but the state map is
@@ -1037,18 +1130,46 @@ impl<H: HostDb> CallExecutor<H> {
 
         let tx = match build_tx(req) {
             Ok(tx) => tx,
-            Err(e) => return encode_validation_error(&e),
+            Err(e) => return self.finish(req, encode_validation_error(&e)),
         };
         let out = self.evm.transact_one(tx);
         // `finalize` still has to run: it clears the journal for the next call.
         // It is O(1) (a `mem::take`); the cost this path avoids is sorting and
         // serialising the taken map, not producing it.
         let _state = self.evm.finalize();
-        match out {
+        let blob = match out {
             Ok(result) => encode_outcome_light(&result),
             Err(e) => encode_validation_error(&format!("{e:?}")),
-        }
+        };
+        self.finish(req, blob)
     }
+}
+
+/// The recorded-calls section of outcome format v5, appended at the very end
+/// of the blob, and ONLY when the request set [`flags::RECORD_CALLS`]:
+///
+/// ```text
+/// u32  recorded call count, then per call, in the order frames were entered:
+///        u32 input length, then that many bytes
+/// u32  byte length of the section above (a footer, read from the END)
+/// ```
+///
+/// It is conditional on the REQUEST, not on the data: the caller set the bit,
+/// so it knows the section is there, and a request without the bit gets the
+/// v4 bytes unchanged. The footer is what makes it path-independent: whatever
+/// precedes the section (a full outcome, a light head, a validation error) is
+/// byte-for-byte the v4 blob the same request would have produced without the
+/// bit, so a decoder strips `section + 4` bytes off the end and decodes the
+/// rest exactly as before, without branching on status or path.
+pub fn encode_recorded_calls(out: &mut Vec<u8>, calls: &[revm::primitives::Bytes]) {
+    let start = out.len();
+    out.extend_from_slice(&(calls.len() as u32).to_le_bytes());
+    for c in calls {
+        out.extend_from_slice(&(c.len() as u32).to_le_bytes());
+        out.extend_from_slice(c.as_ref());
+    }
+    let section_len = (out.len() - start) as u32;
+    out.extend_from_slice(&section_len.to_le_bytes());
 }
 
 /// Build the `TxEnv` for one request.

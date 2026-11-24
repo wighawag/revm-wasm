@@ -4,7 +4,7 @@
 
 > **This is an UNOFFICIAL binding.** It is not affiliated with, endorsed by, or maintained by the revm project. revm is by [bluealloy](https://github.com/bluealloy) and contributors, and is MIT licensed. All of the EVM in this package is theirs; this package is a build configuration, a host interface and a decoder.
 >
-> **It is deliberately not a general-purpose binding.** The build configuration is fixed (every precompile, `opt-level = 3`, and [neither half is negotiable](docs/adr/0001-all-precompiles-opt-level-3.md)). The host interface has one shape. v1 ships **no custom precompiles** and **no inspector**. If you want a configurable revm binding, this is the wrong package and you should build against revm directly.
+> **It is deliberately not a general-purpose binding.** The build configuration is fixed (every precompile, `opt-level = 3`, and [neither half is negotiable](docs/adr/0001-all-precompiles-opt-level-3.md)). The host interface has one shape. It ships **no custom precompiles** and **no inspector**: the one observation it offers is `recordCallsTo`, a recorder of call inputs to one address. If you want a configurable revm binding, this is the wrong package and you should build against revm directly.
 
 ## What you get
 
@@ -97,9 +97,23 @@ const signer = evm.recoverSigner({hash, v: 28, r, s});
 // What is actually running, for a bug report.
 evm.revmVersion; // '42.0.1'
 evm.revmRevision; // '640eafa91beae73bafb7776845d53133f603048f'
-evm.outcomeFormatVersion; // 3
+evm.outcomeFormatVersion; // 5
 evm.abiVersion; // 1
 ```
+
+### Observing `console.log`
+
+Hardhat and forge-std `console.log` STATICCALL the empty account `0x000000000000000000636F6e736F6c652e6c6f67` with ABI-encoded arguments. `recordCallsTo` hands you the input of every call frame that runs a given address's code, in order, without changing anything else about the execution:
+
+```ts
+const out = evm.call({from, to, data, gasLimit, recordCallsTo: CONSOLE_ADDRESS});
+out.recordedCalls; // Uint8Array[]: ABI-decode each one and print it
+```
+
+- **It observes.** Gas, return data, logs and state changes are identical with it on or off, and nothing is pre-warmed. A precompile at that address would be, and would make the first touch in each transaction 2,500 gas cheaper than on a real chain (100 instead of 2,600).
+- **Frames that revert are included**, as are the frames of a transaction that reverts as a whole, which is when you want the output most.
+- CALL, STATICCALL, DELEGATECALL and CALLCODE into the address all count. It works on `call`, `transact` and `create`, committing or not, and with `returnState: false`.
+- It needs an artifact with `outcomeFormatVersion >= 5`, and refuses an older one rather than returning a silently empty list. ([ADR 0007](docs/adr/0007-call-input-recorder.md))
 
 ### Loading the wasm
 
@@ -167,7 +181,7 @@ If even that is too much marshalling, `createRevm({host: (memory) => ...})` take
 - No node, no mempool, no JSON-RPC. Interpreter, state interface and transaction execution only.
 - No reimplementation of fee arithmetic, EIP-161, EIP-6780, access-list warming or gas accounting. All of it is driven out of revm's own paths, on purpose.
 - No vendored or forked revm. It is a pinned git revision.
-- No configurable precompile set, and no inspector, in v1. Both are [designed to be addable without a breaking change](docs/adr/0004-what-v1-leaves-open.md), and both are absent today.
+- No configurable precompile set, and no inspector or general tracer. Both are [designed to be addable without a breaking change](docs/adr/0004-what-v1-leaves-open.md), and both are absent today. The single observation hook is `recordCallsTo`, which records the input bytes of every call frame running one address's code (for `console.log`) and nothing else ([ADR 0007](docs/adr/0007-call-input-recorder.md)).
 
 ## Sizes and numbers
 

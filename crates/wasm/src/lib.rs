@@ -35,8 +35,8 @@
 
 use core::cell::RefCell;
 use revm_wasm_core::{
-    ecrecover_address, encode_validation_error, revm::primitives::hardfork::SpecId, CallExecutor,
-    CallRequest, HostDb, TxExtras,
+    ecrecover_address, encode_recorded_calls, encode_validation_error,
+    revm::primitives::hardfork::SpecId, CallExecutor, CallRequest, HostDb, TxExtras,
 };
 
 // ---------------------------------------------------------------------------
@@ -185,12 +185,15 @@ pub const ABI_VERSION: u32 = 1;
 ///
 /// v1 read-only, v2 added logs and code bytes, v3 added the conditional logs
 /// bloom and the trailing effective gas price, v4 appended the EIP-4844 blob gas
-/// fields (`blobGasUsed`, `blobGasPrice`) after the effective gas price. The
-/// head has been at identical byte offsets across all four versions, and that
+/// fields (`blobGasUsed`, `blobGasPrice`) after the effective gas price, v5
+/// appends the recorded-calls section (with a length footer) ONLY when the
+/// request sets `flags::RECORD_CALLS`, so a v5 blob without it is byte-for-byte
+/// a v4 blob (ADR 0007). The head has been at identical byte offsets across all
+/// five versions, and that
 /// is the discipline: the head is fixed, new sections are appended, and this
 /// number is readable at runtime so a decoder can refuse what it does not
 /// understand instead of misreading it.
-pub const OUTCOME_FORMAT_VERSION: u32 = 4;
+pub const OUTCOME_FORMAT_VERSION: u32 = 5;
 
 /// Version of the request blob layout. Its head is fixed at offsets 0..140.
 pub const REQUEST_FORMAT_VERSION: u8 = 1;
@@ -207,7 +210,7 @@ pub const REQUEST_FORMAT_VERSION: u8 = 1;
 /// 0    u8   version (REQUEST_FORMAT_VERSION)
 /// 1    u8   spec id (revm SpecId discriminant)
 /// 2    u16  reserved, must be 0
-/// 4    u32  flags (see revm_wasm_core::flags; bits 9+ unallocated)
+/// 4    u32  flags (see revm_wasm_core::flags; bits 10+ unallocated)
 /// 8    u64  gas limit
 /// 16   u64  chain id
 /// 24   u64  block number
@@ -219,6 +222,8 @@ pub const REQUEST_FORMAT_VERSION: u8 = 1;
 /// 108  [32] value, big-endian
 /// 140  u32  calldata / init-code length, then that many bytes
 /// +    u32  extras length (0 for none), then that many bytes
+/// +    [20] record-calls target, present ONLY when flag bit 9 (RECORD_CALLS)
+///           is set. Appended, so an artifact that predates it ignores it.
 /// ```
 const REQ_HEAD: usize = 140;
 
@@ -259,6 +264,19 @@ fn decode_request(buf: &[u8]) -> Result<CallRequest, String> {
         return Err(format!("RequestTruncated({})", buf.len()));
     }
 
+    let flags = u32_le(&buf[4..8]);
+    let record_at = extras_at + 4 + extras_len;
+    let record_calls_to = if flags & revm_wasm_core::flags::RECORD_CALLS != 0 {
+        if buf.len() < record_at + 20 {
+            return Err(format!("RequestTruncated({})", buf.len()));
+        }
+        let mut a = [0u8; 20];
+        a.copy_from_slice(&buf[record_at..record_at + 20]);
+        Some(a)
+    } else {
+        None
+    };
+
     let extras = if extras_len == 0 {
         TxExtras::default()
     } else {
@@ -277,8 +295,9 @@ fn decode_request(buf: &[u8]) -> Result<CallRequest, String> {
         block_timestamp: u64_le(&buf[32..40]),
         block_gas_limit: u64_le(&buf[40..48]),
         coinbase: [0u8; 20],
-        flags: u32_le(&buf[4..8]),
+        flags,
         extras,
+        record_calls_to,
     };
     req.caller.copy_from_slice(&buf[48..68]);
     req.to.copy_from_slice(&buf[68..88]);
@@ -413,7 +432,13 @@ fn run(len: u32, light: bool) -> u32 {
         let req = match decode_request(&s.request[..len]) {
             Ok(r) => r,
             Err(e) => {
-                s.outcome = encode_validation_error(&e);
+                let mut out = encode_validation_error(&e);
+                // A requested recorded-calls section is always present, even
+                // (empty) on a malformed request, so the decoder never guesses.
+                if len >= 8 && u32_le(&s.request[4..8]) & revm_wasm_core::flags::RECORD_CALLS != 0 {
+                    encode_recorded_calls(&mut out, &[]);
+                }
+                s.outcome = out;
                 return s.outcome.len() as u32;
             }
         };

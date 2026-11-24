@@ -74,7 +74,7 @@ describe('runtime version reporting', () => {
 		expect(evm.revmVersion).toMatch(/^\d+\.\d+\.\d+$/);
 		// A 40-character git sha, so a bug report can say exactly what ran.
 		expect(evm.revmRevision).toMatch(/^[0-9a-f]{40}$/);
-		expect(evm.outcomeFormatVersion).toBe(4);
+		expect(evm.outcomeFormatVersion).toBe(5);
 		expect(evm.abiVersion).toBe(1);
 		expect(evm.info.build).toContain('precompiles=all');
 	});
